@@ -32,6 +32,7 @@ from app.domain.principal import TenantContext
 from app.infra.email import OutgoingEmail
 from app.infra.rate_limit import InMemoryRateLimiter
 from app.main import create_app
+from app.modules.taxonomy.seed import sync_taxonomy
 from app.modules.tenants.models import Tenant
 from app.modules.users.models import User
 from app.modules.users.rbac import sync_rbac
@@ -118,6 +119,7 @@ async def container(settings: Settings, migrated: None) -> AsyncIterator[Contain
     c.email = RecordingEmailSender()
     async with open_session(c.sessionmaker, TenantContext.platform()) as s:
         await sync_rbac(s)
+        await sync_taxonomy(s)
         await s.commit()
     yield c
     await c.aclose()

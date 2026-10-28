@@ -22,8 +22,23 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _include_object(obj: object, name: str | None, type_: str, reflected: bool, compare_to: object) -> bool:
+    # audit_logs is range-partitioned in raw SQL (0002/0004); autogenerate can't model its partitions or their
+    # indexes and would otherwise propose dropping them.
+    if type_ == "table" and name and name.startswith("audit_logs"):
+        return False
+    if type_ == "index" and name and (name.startswith("audit_logs") or name.startswith("ix_audit_logs")):
+        return False
+    return True
+
+
 def _do_run(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        include_object=_include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

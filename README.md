@@ -10,7 +10,7 @@ Design documents: [`../docs`](../docs/README.md)
 
 ## Contents
 
-1. [Status](#status-phase-1--foundation)
+1. [Status](#status)
 2. [Prerequisites](#prerequisites)
 3. [Local setup](#local-setup)
 4. [Database roles and first-time database setup](#database-roles-and-first-time-database-setup)
@@ -24,7 +24,11 @@ Design documents: [`../docs`](../docs/README.md)
 
 ---
 
-## Status: Phase 1 — Foundation
+## Status
+
+**Phase 1 (Foundation): done.** **Phase 2 (Vendor management): in progress.** Slices 1–2 of 5 are done: the knowledge base schema, taxonomy and vendor read APIs, then proposals and curator approvals. Excel import, PDF import and the vendor UI come next.
+
+### Phase 1
 
 | Area | What's in place |
 |---|---|
@@ -36,6 +40,17 @@ Design documents: [`../docs`](../docs/README.md)
 | Audit log | Append-only (the app role can't update or delete), partitioned by month. Logins, failures, token reuse and every change are recorded in the same transaction as the change. |
 | Background jobs | **Postgres is the queue.** The `jobs` table holds every job, and a runner inside the API process claims them with `FOR UPDATE SKIP LOCKED`, so several runners can never take the same job. Each claim is a lease the runner renews while working; if the process dies or is redeployed, the job is picked up again (up to 3 attempts). Also: idempotency keys, cancellation, live progress over Server-Sent Events, and housekeeping (audit partitions, expired tokens) on a timer. A diagnostics job tests it end to end. |
 | Operations | Structured logs with request IDs, RFC 7807 error responses, `/health/live` and `/health/ready`, CLI for database role setup, seeding and admin creation. |
+
+### Phase 2 so far
+
+| Area | What's in place |
+|---|---|
+| Global knowledge base | `vendors`, plus their domains, aliases, locations, industries, equipment, services, certifications, reference projects, sources, and per-fact evidence (`fact_sources`). Shared by all tenants (no `tenant_id`). Facts are retired rather than deleted. |
+| Taxonomy | A hierarchical equipment classification (129 nodes, e.g. API 610 pump types OH1-OH6 / BB1-BB5 / VS1-VS7, compressors by API 617/618/619, valves, static, electrical, I&C, packages, offshore systems), 20 service categories, 24 certification types and 14 industries. Codes are dot paths (`pumps.centrifugal.api610.bb2`), so filtering by a parent category includes every descendant. Defined in [app/modules/taxonomy/seed_data.py](app/modules/taxonomy/seed_data.py) and synced by `bootstrap`. |
+| Vendor search & detail | Filter by free text (name, alias, website or description), country (HQ or any location), equipment or service category (with descendants), certification, industry and your own approval (AVL) status. Results are sorted alphabetically with cursor pagination. The detail view includes every fact. |
+| My vendors (tenant overlay) | Each organization keeps its own approval (AVL) status, internal vendor code, tags and notes for any global vendor, without copying it. Tenant-private under RLS, and audited. |
+| Proposals & approvals | The only way data enters the global knowledge base. A proposal is a new or existing vendor plus items: create vendor, add equipment, service, certification, project, location, industry, domain or alias, or change a field. Each item's payload is validated per action, and each can carry evidence (URL, title, snippet, page). Curators (`knowledge:approve`) can edit pending items, approve or reject them per item (rejections need a reason), or ask for more information. Optimistic locking (`version`) stops two curators overwriting each other. Approved items are written to the knowledge base in one transaction. Applying is idempotent per fact, and a website that already belongs to another vendor is refused, so the vendors get merged instead of duplicated. Evidence becomes `vendor_sources` and `fact_sources` rows, and every decision goes to `approval_history` and the audit log. Automated sources (Excel, PDF, AI) call the same service, optionally with automatic approval for trusted tenants. Tenants see their own proposals' status at `/proposals/mine`, never where other proposals came from. |
+| Normalisation | Company-name keys that drop legal forms ("Flowserve Corp." = "Flowserve"), registrable web domains from the bundled public-suffix list, and country names to ISO codes. These are the basis for duplicate detection in the Excel import. |
 
 ---
 
@@ -227,9 +242,9 @@ app/
   db/            declarative base, mixins (id / created_* / updated_*), tenant-aware session hooks, role provisioning
   domain/        enums, permission catalogue and role bundles, Principal / TenantContext
   infra/         email, rate limiting
-  modules/       auth · tenants · users · api_keys · audit · jobs   (router / schemas / service / models)
+  modules/       auth · tenants · users · api_keys · audit · jobs · taxonomy · vendors · tenant_vendors · proposals
   workers/       Postgres job runner (claim / lease / heartbeat), job handlers, maintenance
-migrations/      0001 extensions · 0002 tables · 0003 RLS policies & grants · 0004 audit-partition maintenance · 0005 job-queue lease columns
+migrations/      0001 extensions · 0002 tables · 0003 RLS · 0004 audit partitions · 0005 job queue · 0006 knowledge base · 0007 proposals
 tests/           unit tests + integration tests against TEST_DATABASE_URL
 ```
 
@@ -257,6 +272,11 @@ All routes are under `/api/v1`. Full contracts: [`../docs/04-api-contracts.md`](
 | API keys | `GET/POST /api-keys`, `DELETE /api-keys/{id}` |
 | Audit | `GET /audit-logs` |
 | Jobs | `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel`, `GET /jobs/{id}/events` (SSE) |
+| Taxonomy | `GET /taxonomy/equipment-categories`, `/taxonomy/service-categories`, `/taxonomy/certification-types`, `/taxonomy/industries` |
+| Vendors | `GET /vendors` (filters: `q`, `country`, `equipment_category`, `service_category`, `certification`, `industry`, `avl_status`), `GET /vendors/{id}` |
+| My vendors | `PUT /my-vendors/{vendor_id}` (AVL status, internal code, tags, notes), `DELETE /my-vendors/{vendor_id}` |
+| Proposals (curators) | `GET/POST /admin/proposals`, `GET /admin/proposals/{id}`, `PATCH /admin/proposals/{id}/items/{item_id}`, `POST /admin/proposals/{id}/approve` · `/reject` · `/request-info` |
+| Proposals (tenants) | `GET /proposals/mine` |
 
 Errors use RFC 7807 (`application/problem+json`) with a machine-readable `code` and the `request_id`.
 

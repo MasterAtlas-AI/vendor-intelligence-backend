@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import DateTime, String, Text, func
@@ -18,8 +18,13 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # Set client-side (not only server_default) so INSERTs need no RETURNING: with RLS, RETURNING also applies
+    # the SELECT policy to the new row, which would block curators writing platform-level (tenant_id NULL) events.
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), primary_key=True, server_default=func.now()
+        DateTime(timezone=True),
+        primary_key=True,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )
     tenant_id: Mapped[uuid.UUID | None] = mapped_column()
     actor_type: Mapped[ActorType] = mapped_column(pg_enum(ActorType, "actor_type"))

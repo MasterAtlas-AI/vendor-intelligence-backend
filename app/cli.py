@@ -19,6 +19,7 @@ from app.domain.enums import UserStatus
 from app.domain.permissions import PLATFORM_ROLES
 from app.domain.principal import TenantContext
 from app.modules.auth.service import validate_password_policy
+from app.modules.taxonomy.seed import sync_taxonomy
 from app.modules.users.models import User
 from app.modules.users.rbac import sync_rbac
 from app.workers.maintenance import ensure_audit_partitions
@@ -46,6 +47,7 @@ async def _bootstrap() -> None:
     try:
         async with open_session(build_sessionmaker(engine), TenantContext.platform()) as s:
             await sync_rbac(s)
+            await sync_taxonomy(s)
             await ensure_audit_partitions(s)
             await s.commit()
     finally:
@@ -54,9 +56,9 @@ async def _bootstrap() -> None:
 
 @cli.command()
 def bootstrap() -> None:
-    """Sync permissions/system roles and pre-create audit partitions. Idempotent; run after every migration."""
+    """Sync permissions/roles and the taxonomy, pre-create audit partitions. Idempotent; run after every migration."""
     asyncio.run(_bootstrap())
-    typer.echo("RBAC catalogue synchronised; audit partitions ensured.")
+    typer.echo("RBAC catalogue and taxonomy synchronised; audit partitions ensured.")
 
 
 async def _create_platform_user(email: str, name: str, password: str, role: str) -> None:

@@ -18,6 +18,7 @@ dependencies = [
     "structlog>=24.4",
     "python-multipart>=0.0.17",
     "typer>=0.13",
+    "tldextract>=5.1",
 ]
 
 [project.optional-dependencies]
