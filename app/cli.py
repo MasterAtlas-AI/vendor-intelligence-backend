@@ -103,6 +103,19 @@ def create_platform_user(
     typer.echo(f"Platform user {email} ready with role {role}.")
 
 
+@cli.command("export-openapi")
+def export_openapi(output: str = typer.Option("openapi.json", help="File to write")) -> None:
+    """Write the OpenAPI schema (no database needed). The frontend generates its typed client from it."""
+    import json
+    from pathlib import Path
+
+    from app.main import create_app
+
+    schema = create_app().openapi()
+    Path(output).write_text(json.dumps(schema, indent=2), encoding="utf-8")
+    typer.echo(f"Wrote {output} ({len(schema['paths'])} paths)")
+
+
 async def _run_worker() -> None:
     settings = get_settings()
     engine = build_engine(settings)
