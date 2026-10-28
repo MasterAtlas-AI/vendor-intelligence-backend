@@ -189,6 +189,12 @@ The integration suite covers:
 
 Run from outside the US against Render, the full suite takes about 25 minutes, because every query crosses the network. Run single files while working, e.g. `pytest tests/test_jobs.py`.
 
+### CI (GitHub Actions)
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every push to `main` and on pull requests. It runs lint, the format check, mypy, a check that migrations have a single head and render to SQL, the OpenAPI export, and the tests.
+
+Integration tests run in CI only if the repository secret **`TEST_DATABASE_URL`** is set (GitHub → Settings → Secrets and variables → Actions). Set it to the owner URL of the disposable test database, e.g. `masteratlas_test`. Without the secret, those tests are skipped and the run still passes. Runs are serialised, because they share that database.
+
 ---
 
 ## Deploying to Render

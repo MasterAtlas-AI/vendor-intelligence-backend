@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Integration tests wipe and rebuild the shared test database, so two runs must never overlap.
+concurrency:
+  group: backend-ci-test-db
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check app tests migrations
+          ruff format --check app tests migrations
+
+      - name: Type check
+        run: mypy app
+
+      - name: Migrations render cleanly (single head, valid SQL)
+        run: |
+          test "$(alembic heads | wc -l)" -eq 1
+          alembic upgrade head --sql > /dev/null
+
+      - name: OpenAPI schema exports
+        run: python -m app.cli export-openapi --output /tmp/openapi.json
+
+      # Unit tests always run. Integration tests run only when the TEST_DATABASE_URL secret is set
+      # (owner URL of a disposable database whose name contains "test", e.g. masteratlas_test on Render);
+      # otherwise they are skipped. The harness refuses any database configured as the app database.
+      - name: Tests
+        env:
+          TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+        run: pytest -q -rs
