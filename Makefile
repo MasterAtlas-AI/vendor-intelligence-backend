@@ -4,7 +4,7 @@ ifeq ($(OS),)
 PY = .venv/bin/python
 endif
 
-.PHONY: install migrate bootstrap dev worker beat test lint format
+.PHONY: install migrate bootstrap dev worker test lint format
 
 install:
 	python -m venv .venv && $(PY) -m pip install -e ".[dev]"
@@ -18,11 +18,8 @@ bootstrap:
 dev:
 	$(PY) -m uvicorn app.main:app --reload --port 8000
 
-worker:
-	$(PY) -m celery -A app.workers.celery_app worker -Q default,ingest,ai_discovery,ai_enrich,reports -l info --pool=solo
-
-beat:
-	$(PY) -m celery -A app.workers.celery_app beat -l info
+worker:  # optional: only with JOB_RUNNER_ENABLED=false on the API
+	$(PY) -m app.cli run-worker
 
 test:
 	$(PY) -m pytest -q

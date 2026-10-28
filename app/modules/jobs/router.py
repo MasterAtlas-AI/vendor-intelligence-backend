@@ -23,7 +23,7 @@ SSE_HEARTBEAT_SECONDS = 15.0
 
 
 def get_job_service(session: SessionDep, principal: PrincipalDep, c: ContainerDep) -> JobService:
-    return JobService(session, principal, c.jobs)
+    return JobService(session, principal, c.job_runner.notify)
 
 
 Svc = Annotated[JobService, Depends(get_job_service)]
@@ -65,7 +65,7 @@ async def job_events(
     """Server-Sent Events: `progress` on every change, `completed`/`failed`/`cancelled` at the end.
 
     Polls the jobs table with short-lived sessions so no connection is held for the stream's lifetime.
-    (Phase 3 swaps polling for Redis pub/sub without changing the event contract.)
+    (Postgres LISTEN/NOTIFY can replace polling later without changing the event contract.)
     """
     await svc.get(job_id)  # 404 before opening the stream
     await svc.s.rollback()  # release the request session's connection; the stream uses its own sessions
@@ -75,7 +75,7 @@ async def job_events(
         idle = 0.0
         while not await request.is_disconnected():
             async with open_session(c.sessionmaker, principal.tenant_context(), principal.user_id) as s:
-                job = await JobService(s, principal, c.jobs).get(job_id)
+                job = await JobService(s, principal, c.job_runner.notify).get(job_id)
                 snapshot = JobRead.model_validate(job)
             state = (snapshot.status, snapshot.stage, snapshot.progress)
             if state != last:

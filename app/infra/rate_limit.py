@@ -1,8 +1,5 @@
 import time
-from collections import defaultdict
 from typing import Protocol
-
-from redis.asyncio import Redis
 
 
 class RateLimiter(Protocol):
@@ -11,30 +8,22 @@ class RateLimiter(Protocol):
         ...
 
 
-class RedisRateLimiter:
-    """Fixed-window counter; one INCR per hit, shared across API replicas."""
-
-    def __init__(self, redis: Redis) -> None:
-        self._redis = redis
-
-    async def hit(self, key: str, limit: int, window_seconds: int) -> bool:
-        window = int(time.time() // window_seconds)
-        redis_key = f"rl:{key}:{window}"
-        async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.incr(redis_key)
-            pipe.expire(redis_key, window_seconds)
-            count, _ = await pipe.execute()
-        return int(count) <= limit
-
-
 class InMemoryRateLimiter:
-    """Single-process limiter for tests and local runs without Redis."""
+    """Fixed-window counter per process. Limits are per API instance, which is fine for a single instance;
+    a shared (Postgres-backed) limiter is needed before scaling out horizontally."""
+
+    _MAX_BUCKETS = 50_000
 
     def __init__(self) -> None:
-        self._counts: dict[str, int] = defaultdict(int)
+        self._buckets: dict[str, tuple[int, float]] = {}  # bucket -> (count, expires_at)
 
     async def hit(self, key: str, limit: int, window_seconds: int) -> bool:
-        window = int(time.time() // window_seconds)
-        bucket = f"{key}:{window}"
-        self._counts[bucket] += 1
-        return self._counts[bucket] <= limit
+        now = time.time()
+        window = int(now // window_seconds)
+        bucket = f"{key}:{window_seconds}:{window}"
+        count, expires_at = self._buckets.get(bucket, (0, (window + 1) * window_seconds))
+        self._buckets[bucket] = (count + 1, expires_at)
+        if len(self._buckets) > self._MAX_BUCKETS:
+            # Keep memory bounded: drop buckets whose window has ended.
+            self._buckets = {k: v for k, v in self._buckets.items() if v[1] > now}
+        return count + 1 <= limit

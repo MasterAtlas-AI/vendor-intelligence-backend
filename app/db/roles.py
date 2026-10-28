@@ -34,14 +34,25 @@ async def ensure_app_role(settings: Settings, role: str, password: str) -> None:
             exists = (
                 await conn.execute(text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": role})
             ).scalar()
-            verb = "ALTER" if exists else "CREATE"
             # DDL can't take bind parameters; both values were validated against strict patterns above.
-            await conn.execute(
-                text(
-                    f"{verb} ROLE {role} LOGIN PASSWORD '{password}' "
-                    "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
+            if exists:
+                # Rotation only: managed Postgres (Render) rejects ALTER ROLE ... NOSUPERUSER/NOBYPASSRLS from
+                # non-superusers, and the attributes were fixed at creation anyway.
+                await conn.execute(text(f"ALTER ROLE {role} LOGIN PASSWORD '{password}'"))
+            else:
+                await conn.execute(
+                    text(
+                        f"CREATE ROLE {role} LOGIN PASSWORD '{password}' "
+                        "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
+                    )
                 )
-            )
+            flags = (
+                await conn.execute(
+                    text("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = :r"), {"r": role}
+                )
+            ).scalar()
+            if flags:
+                raise RuntimeError(f"role {role} can bypass Row-Level Security; refusing to use it")
             await conn.execute(text(f'GRANT CONNECT ON DATABASE "{database}" TO {role}'))
     finally:
         await engine.dispose()

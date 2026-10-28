@@ -1,34 +1,28 @@
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
-import anyio
 from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import Conflict, NotFound
-from app.core.logging import get_logger
 from app.core.pagination import paginate
 from app.domain.enums import JobStatus, JobType
 from app.domain.permissions import P
 from app.domain.principal import Principal
-from app.infra.queue import JobDispatcher
 from app.modules.audit.service import record_audit
 from app.modules.jobs.models import Job
 
-log = get_logger(__name__)
-
-# job type -> (celery task name, queue)
-TASK_ROUTES: dict[str, tuple[str, str]] = {
-    JobType.DIAGNOSTICS: ("jobs.diagnostics", "default"),
-}
-
 
 class JobService:
-    def __init__(self, session: AsyncSession, principal: Principal, dispatcher: JobDispatcher) -> None:
+    def __init__(
+        self, session: AsyncSession, principal: Principal, notify_runner: Callable[[], None]
+    ) -> None:
         self.s = session
         self.principal = principal
-        self.dispatcher = dispatcher
+        self.notify_runner = notify_runner
 
     async def _replay(self, job_type: JobType, idempotency_key: str) -> Job | None:
         """The job previously created with this key, if any. Keys are scoped to the caller."""
@@ -50,14 +44,12 @@ class JobService:
         if idempotency_key and (existing := await self._replay(job_type, idempotency_key)):
             return existing
 
-        task_name, queue = TASK_ROUTES[job_type]
         job = Job(
             tenant_id=self.principal.tenant_id,
             user_id=self.principal.user_id,
             type=job_type,
             input=payload,
             idempotency_key=idempotency_key,
-            queue=queue,
         )
         self.s.add(job)
         try:
@@ -76,17 +68,9 @@ class JobService:
             entity_id=job.id,
             changes={"type": job_type},
         )
-        # Commit before enqueueing so the worker can always see the row.
+        # Committing the row *is* enqueueing it; the nudge just saves this process's runner a poll interval.
         await self.s.commit()
-        try:
-            job.celery_task_id = await anyio.to_thread.run_sync(
-                self.dispatcher.dispatch, task_name, job.id, queue
-            )
-        except Exception as exc:
-            log.exception("job.dispatch_failed", job_id=str(job.id))
-            job.status = JobStatus.FAILED
-            job.error = {"code": "dispatch_failed", "message": str(exc)[:500]}
-        await self.s.commit()
+        self.notify_runner()
         return job
 
     def _visible(self, stmt: Select[Job]) -> Select[Job]:
@@ -120,7 +104,9 @@ class JobService:
             raise Conflict("Job already finished", code="job_finished")
         job.cancel_requested = True
         if job.status == JobStatus.QUEUED:
-            job.status = JobStatus.CANCELLED  # worker skips cancelled jobs when it picks them up
+            # Not started yet: settle it now. Running jobs stop at their next progress update.
+            job.status = JobStatus.CANCELLED
+            job.finished_at = datetime.now(UTC)
         record_audit(
             self.s, "job.cancel_requested", principal=self.principal, entity_type="job", entity_id=job.id
         )

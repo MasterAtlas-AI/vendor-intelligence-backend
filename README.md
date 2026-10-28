@@ -1,8 +1,8 @@
 # vendor-intelligence-backend
 
-API and background workers for **MasterAtlas AI**, the enterprise AI vendor intelligence platform.
+API and background job runner for **MasterAtlas AI**, the enterprise AI vendor intelligence platform.
 
-**Stack:** Python 3.12 · FastAPI · SQLAlchemy 2 (async, asyncpg) · Alembic · PostgreSQL (Render, with pgvector) · Redis · Celery
+**Stack:** Python 3.12 · FastAPI · SQLAlchemy 2 (async, asyncpg) · Alembic · PostgreSQL (Render, with pgvector). No Redis, no Celery, no Docker.
 
 Design documents: [`../docs`](../docs/README.md)
 
@@ -34,7 +34,7 @@ Design documents: [`../docs`](../docs/README.md)
 | Tenants & users | Platform admins create tenants (which invites the tenant's first admin), suspend and reactivate them. Tenant admins invite, edit, disable users and assign roles. The last tenant admin can't be removed. |
 | API keys | Format `mai_live_<prefix>_<secret>`, stored hashed, shown once. Scoped (never broader than the creator), optional expiry and IP allow-list, revocable. |
 | Audit log | Append-only (the app role can't update or delete), partitioned by month. Logins, failures, token reuse and every change are recorded in the same transaction as the change. |
-| Background jobs | `jobs` table as the source of truth, Celery queues, idempotency keys, cancellation, progress, a live Server-Sent Events stream, and crash-safe failure recording. A diagnostics job tests the pipeline end to end. |
+| Background jobs | **Postgres is the queue.** The `jobs` table holds every job, and a runner inside the API process claims them with `FOR UPDATE SKIP LOCKED`, so several runners can never take the same job. Each claim is a lease the runner renews while working; if the process dies or is redeployed, the job is picked up again (up to 3 attempts). Also: idempotency keys, cancellation, live progress over Server-Sent Events, and housekeeping (audit partitions, expired tokens) on a timer. A diagnostics job tests it end to end. |
 | Operations | Structured logs with request IDs, RFC 7807 error responses, `/health/live` and `/health/ready`, CLI for database role setup, seeding and admin creation. |
 
 ---
@@ -43,9 +43,7 @@ Design documents: [`../docs`](../docs/README.md)
 
 - **Python 3.12** (`python --version`)
 - **A PostgreSQL database** with the `vector`, `pg_trgm`, `citext`, `unaccent`, `btree_gin` and `pgcrypto` extensions available. Render PostgreSQL has all of them.
-- **Redis**, only for background jobs (Celery). Use a Render Key Value instance. Everything else runs without it.
-
-No Docker is required.
+No Redis, message broker or Docker is required. Background jobs use the same Postgres database.
 
 ---
 
@@ -83,7 +81,7 @@ The app uses **two database logins**:
 | Login | Used by | Can |
 |---|---|---|
 | Owner (the user Render created, e.g. `masteratlas_user`) → `MIGRATION_DATABASE_URL` | Alembic migrations and `create-app-role` only | Create tables, extensions and roles |
-| Runtime role `app_rw` → `DATABASE_URL` | The API and workers | Read and write rows only, always subject to Row-Level Security. Can't change the audit log. |
+| Runtime role `app_rw` → `DATABASE_URL` | The API (including its job runner) | Read and write rows only, always subject to Row-Level Security. Can't change the audit log. |
 
 **For a brand-new, empty database**, run these once, in this order:
 
@@ -121,18 +119,17 @@ Password policy: at least 12 characters, at least 3 of lowercase, uppercase, dig
 - OpenAPI schema (used by the frontend client generator): http://localhost:8000/api/v1/openapi.json
 - Health: http://localhost:8000/health/ready
 
-**Background worker** (needs `REDIS_URL` pointing at a real Redis)
+**Background jobs** need nothing extra: the API starts a job runner on startup (`job_runner: "running"` in `/health/ready`). Queued jobs start within about a second.
+
+To check it, sign in as the super admin and call `POST /api/v1/admin/jobs/diagnostics`. Then open `GET /api/v1/jobs/{job_id}/events` to watch its progress live until `event: completed`.
+
+**Optional: a separate worker process.** If job load ever slows the API down, run jobs in their own process: set `JOB_RUNNER_ENABLED=false` on the API, then start one or more workers (they share the queue safely):
 
 ```bash
-.venv\Scripts\python -m celery -A app.workers.celery_app worker -Q default,ingest,ai_discovery,ai_enrich,reports -l info --pool=solo
-.venv\Scripts\python -m celery -A app.workers.celery_app beat -l info
+.venv\Scripts\python -m app.cli run-worker
 ```
 
-`--pool=solo` is needed on Windows. Leave it out on Linux. Beat runs the scheduled maintenance tasks (audit partitions, expired-token cleanup).
-
-To check the pipeline, sign in as the super admin and call `POST /api/v1/admin/jobs/diagnostics`. Then open `GET /api/v1/jobs/{job_id}/events` to watch its progress live. If Redis isn't configured, the job is marked `failed` with `dispatch_failed` within a few seconds.
-
-**Make shortcuts** (Git Bash / macOS / Linux): `make install`, `make migrate`, `make bootstrap`, `make dev`, `make worker`, `make beat`, `make test`, `make lint`, `make format`.
+**Make shortcuts** (Git Bash / macOS / Linux): `make install`, `make migrate`, `make bootstrap`, `make dev`, `make worker`, `make test`, `make lint`, `make format`.
 
 ---
 
@@ -147,8 +144,11 @@ All settings are environment variables (or `.env` entries). They are defined in 
 | `MIGRATION_DATABASE_URL` | — | Owner role, used by Alembic and `create-app-role` |
 | `APP_DB_ROLE` | `app_rw` | Name of the runtime role that migrations grant privileges to |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | `10` / `10` | Keep the total under your Render plan's connection limit |
-| `REDIS_URL` | `redis://localhost:6379/0` | Celery broker (and rate limiter when `RATE_LIMIT_BACKEND=redis`) |
-| `RATE_LIMIT_BACKEND` | `redis` | `memory` works for a single API process only |
+| `JOB_RUNNER_ENABLED` | `true` | Run jobs inside the API. Set `false` only when using `app.cli run-worker` |
+| `JOB_CONCURRENCY` | `2` | Jobs run at once per runner |
+| `JOB_POLL_SECONDS` | `1.0` | How often an idle runner checks for new jobs (jobs created in the same process start immediately) |
+| `JOB_LEASE_SECONDS` | `120` | How long a claim lasts without renewal. After a crash, the job is retried about this long later |
+| `MAINTENANCE_INTERVAL_MINUTES` | `360` | Housekeeping interval (audit partitions, expired-token cleanup) |
 | `JWT_ALGORITHM` | `HS256` | `EdDSA`/`RS256` with `JWT_PRIVATE_KEY` + `JWT_PUBLIC_KEY` |
 | `JWT_SECRET` | — | At least 32 characters outside local/dev |
 | `JWT_KEY_ID` | `local-1` | Change when rotating signing keys |
@@ -175,7 +175,7 @@ All settings are environment variables (or `.env` entries). They are defined in 
 
 **Unit tests** need nothing.
 
-**Integration tests** (API, tenant isolation, roles and permissions, jobs) need `TEST_DATABASE_URL` in `.env`. It must point at a **dedicated, disposable** database whose name contains `test`, for example a second free Render Postgres named `masteratlas_test`. Every run rolls all migrations down and up again, which **drops every table**. Without `TEST_DATABASE_URL`, integration tests are skipped.
+**Integration tests** (API, tenant isolation, roles and permissions, jobs) need `TEST_DATABASE_URL` in `.env`. It must point at a **dedicated, disposable** database whose name contains `test`. For this project that is `masteratlas_test` on the same Render instance, already configured in `.env`. Every run rolls all migrations down and up again, which **drops every table**. Without `TEST_DATABASE_URL`, integration tests are skipped.
 
 Safety guards: the harness refuses to run if `TEST_DATABASE_URL` points at the same database as `DATABASE_URL` or `MIGRATION_DATABASE_URL`, or if the database name doesn't contain `test`. It uses its own runtime role (`app_rw_test`), so it never touches the real `app_rw` password.
 
@@ -185,26 +185,27 @@ The integration suite covers:
 - refresh-token rotation, reuse detection and the two-tab grace window
 - lockout, invitation and password-reset flows
 - API key scopes and IP allow-lists
-- idempotent job creation, and job success, failure and crash handling
+- the job queue: claiming, two runners never taking the same job, crash recovery when a lease expires, retry limits, cancellation, idempotency, and the live background loop
+
+Run from outside the US against Render, the full suite takes about 25 minutes, because every query crosses the network. Run single files while working, e.g. `pytest tests/test_jobs.py`.
 
 ---
 
 ## Deploying to Render
 
-Create these services in the same region as the database (Oregon):
+One service is enough: it serves the API and runs the background jobs. Create it in the same region as the database (Oregon):
 
 | Service | Type | Build command | Start command |
 |---|---|---|---|
 | `masteratlas-api` | Web Service (Python) | `pip install .` | `uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"` |
-| `masteratlas-worker` | Background Worker | `pip install .` | `celery -A app.workers.celery_app worker -Q default,ingest,ai_discovery,ai_enrich,reports -l info` |
-| `masteratlas-beat` | Background Worker | `pip install .` | `celery -A app.workers.celery_app beat -l info` |
-| Redis | Key Value | — | — |
 
 - **Pre-deploy command** (API service): `alembic upgrade head && python -m app.cli bootstrap`
 - **Python version:** pinned by [.python-version](.python-version).
 - **Database URLs:** on Render, use the **Internal** database URLs (no `?ssl=require`), e.g. `postgresql+asyncpg://app_rw:...@dpg-xxxx-a/masteratlas`.
 - **`--proxy-headers`:** Render terminates TLS in front of the app. Without this flag, every request appears to come from Render's proxy, which breaks audit-log IP addresses, login rate limiting and API-key IP allow-lists.
-- **Environment:** set `ENVIRONMENT=prod`, `LOG_JSON=true`, `RATE_LIMIT_BACKEND=redis`, `REFRESH_COOKIE_SECURE=true`, a strong `JWT_SECRET`, `CORS_ORIGINS` and `FRONTEND_URL` for the real frontend, and `EMAIL_BACKEND=smtp` with `SMTP_*` values.
+- **Environment:** set `ENVIRONMENT=prod`, `LOG_JSON=true`, `REFRESH_COOKIE_SECURE=true`, a strong `JWT_SECRET`, `CORS_ORIGINS` and `FRONTEND_URL` for the real frontend, and `EMAIL_BACKEND=smtp` with `SMTP_*` values.
+- **Instance type:** use an always-on instance. Render's free web services sleep after about 15 minutes without traffic, which pauses jobs. Interrupted jobs resume when it wakes, but that can take a long time.
+- **Scaling later:** add a Render Background Worker with start command `python -m app.cli run-worker` and set `JOB_RUNNER_ENABLED=false` on the API, or run more API instances. Either way, first move rate limiting into Postgres (see Known gaps).
 - **Cookies across domains:** if the frontend and API are both on default `*.onrender.com` hosts, they are different sites (`onrender.com` is a public suffix). Then set `REFRESH_COOKIE_SAMESITE=none`. With custom domains under one parent (e.g. `app.masteratlas.ai` and `api.masteratlas.ai`), keep `strict`.
 
 ---
@@ -214,15 +215,15 @@ Create these services in the same region as the database (Oregon):
 ```
 app/
   main.py        app factory: middleware, error handlers, routers
-  cli.py         create-app-role · bootstrap · create-platform-user
+  cli.py         create-app-role · bootstrap · create-platform-user · run-worker
   core/          config, logging, errors (problem+json), security (Argon2 / JWT / API keys), pagination, DI container
   api/           dependencies (auth, tenant-bound sessions, require()), request-context middleware, health
   db/            declarative base, mixins (id / created_* / updated_*), tenant-aware session hooks, role provisioning
   domain/        enums, permission catalogue and role bundles, Principal / TenantContext
-  infra/         email, rate limiting, job dispatch
+  infra/         email, rate limiting
   modules/       auth · tenants · users · api_keys · audit · jobs   (router / schemas / service / models)
-  workers/       Celery app, job runtime, tasks
-migrations/      0001 extensions · 0002 tables · 0003 RLS policies & grants · 0004 audit-partition maintenance
+  workers/       Postgres job runner (claim / lease / heartbeat), job handlers, maintenance
+migrations/      0001 extensions · 0002 tables · 0003 RLS policies & grants · 0004 audit-partition maintenance · 0005 job-queue lease columns
 tests/           unit tests + integration tests against TEST_DATABASE_URL
 ```
 
@@ -230,8 +231,9 @@ Conventions:
 
 - **Routers are thin.** Services hold the use cases and **commit explicitly**. Audit rows join the same transaction.
 - **Sessions:** every session is opened with `open_session(sessionmaker, TenantContext, actor_id)`. Using a session without a tenant context raises an error.
-- **Platform sessions:** only `AuthService`, the CLI and workers open platform-mode sessions on behalf of callers who aren't super admins.
+- **Platform sessions:** only `AuthService`, the CLI and the job runner open platform-mode sessions on behalf of callers who aren't super admins.
 - **New tenant-owned tables** must have a `tenant_id` column, get an RLS policy in their migration, and get an isolation test.
+- **New background work:** add an async handler to `app/workers/handlers.py` for a new `JobType`. Handlers can be re-run after a crash, so make them safe to repeat. Push CPU-heavy work (PDF parsing, large spreadsheets) to a thread with `anyio.to_thread.run_sync` so the API stays responsive.
 - **Migrations are hand-written.** Run `alembic upgrade head` and the test suite, which also exercises downgrades, before merging.
 
 ---
@@ -256,7 +258,7 @@ Errors use RFC 7807 (`application/problem+json`) with a machine-readable `code` 
 
 ## Known gaps
 
-- **Background jobs need Redis.** Until `REDIS_URL` points at a real instance, jobs fail with `dispatch_failed`, and beat (scheduled maintenance) can't run. `bootstrap` pre-creates audit partitions so nothing breaks in the meantime.
-- **Job progress is polled once a second** for the SSE stream. Phase 3 switches it to Redis pub/sub without changing the event format.
-- **Each request re-reads the user, roles and tenant** to authorise. A short Redis cache is planned when traffic needs it.
+- **Rate limiting is per process.** That is correct with one API instance. Move it into Postgres before running several instances.
+- **Polling:** job progress (SSE) and idle runners each poll Postgres once a second. Postgres `LISTEN/NOTIFY` can replace both later without API changes.
+- **Each request re-reads the user, roles and tenant** to authorise. An in-process cache can be added when traffic needs it.
 - **Changing your password signs out every session, including the current one.** The client must sign in again.

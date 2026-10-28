@@ -27,9 +27,12 @@ class Settings(BaseSettings):
     db_max_overflow: int = 10
     db_echo: bool = False
 
-    redis_url: str = "redis://localhost:6379/0"
-    celery_broker_url: str | None = None
-    celery_result_backend: str | None = None
+    # Background jobs (Postgres-backed queue, see app.workers.runner)
+    job_runner_enabled: bool = True  # run jobs inside the API process; false when using `app.cli run-worker`
+    job_concurrency: int = 2
+    job_poll_seconds: float = 1.0
+    job_lease_seconds: int = 120
+    maintenance_interval_minutes: int = 360
 
     # Auth
     jwt_algorithm: Literal["HS256", "EdDSA", "RS256"] = "HS256"
@@ -58,8 +61,6 @@ class Settings(BaseSettings):
     login_rate_limit_per_minute: int = 10
     api_key_prefix: str = "mai_live"
 
-    rate_limit_backend: Literal["redis", "memory"] = "redis"
-
     cors_origins: list[str] = ["http://localhost:3000"]
     frontend_url: str = "http://localhost:3000"
 
@@ -70,10 +71,6 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     smtp_starttls: bool = False
     smtp_from: str = "MasterAtlas AI <no-reply@masteratlas.local>"
-
-    @property
-    def broker_url(self) -> str:
-        return self.celery_broker_url or self.redis_url
 
     @property
     def is_production(self) -> bool:

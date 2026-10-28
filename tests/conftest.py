@@ -12,7 +12,7 @@ because the down-migration drops every table.
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -60,15 +60,6 @@ class RecordingEmailSender:
         return next(m for m in reversed(self.sent) if m.to == to)
 
 
-@dataclass
-class FakeDispatcher:
-    calls: list[tuple[str, uuid.UUID, str]] = field(default_factory=list)
-
-    def dispatch(self, task_name: str, job_id: uuid.UUID, queue: str) -> str:
-        self.calls.append((task_name, job_id, queue))
-        return f"fake-{job_id}"
-
-
 def _target(url: str) -> tuple[str | None, int | None, str | None]:
     u = make_url(url)
     return (u.host or "").lower(), u.port or 5432, u.database
@@ -97,7 +88,8 @@ def settings() -> Settings:
         migration_database_url=owner_url,
         app_db_role=TEST_APP_ROLE,
         jwt_secret="test-secret-that-is-long-enough-for-hs256-signing",  # type: ignore[arg-type]
-        rate_limit_backend="memory",
+        job_runner_enabled=False,  # tests drive the runner explicitly (runner.run_once())
+        job_lease_seconds=30,
         refresh_cookie_secure=False,
         log_json=False,
         log_level="WARNING",
@@ -124,7 +116,6 @@ async def migrated(settings: Settings) -> None:
 async def container(settings: Settings, migrated: None) -> AsyncIterator[Container]:
     c = build_container(settings)
     c.email = RecordingEmailSender()
-    c.jobs = FakeDispatcher()
     async with open_session(c.sessionmaker, TenantContext.platform()) as s:
         await sync_rbac(s)
         await s.commit()
@@ -154,12 +145,6 @@ async def client(app) -> AsyncIterator[AsyncClient]:  # type: ignore[no-untyped-
 def emails(container: Container) -> RecordingEmailSender:
     assert isinstance(container.email, RecordingEmailSender)
     return container.email
-
-
-@pytest.fixture
-def dispatcher(container: Container) -> FakeDispatcher:
-    assert isinstance(container.jobs, FakeDispatcher)
-    return container.jobs
 
 
 # ---------------------------------------------------------------------------- data factories

@@ -19,6 +19,7 @@ class JobRead(BaseModel):
     result: dict[str, Any] | None
     error: dict[str, Any] | None
     attempts: int
+    max_attempts: int
     cost_usd: Decimal
     cancel_requested: bool
     user_id: uuid.UUID | None

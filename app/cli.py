@@ -1,14 +1,17 @@
 """Operational commands. Run `python -m app.cli --help` for the list."""
 
 import asyncio
+import contextlib
 import getpass
+import signal
 
 import typer
 from pydantic import EmailStr, TypeAdapter, ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.exceptions import ValidationFailed
+from app.core.logging import configure_logging
 from app.core.security import hash_password
 from app.db.roles import ensure_app_role, generate_db_password, runtime_database_url
 from app.db.session import build_engine, build_sessionmaker, open_session
@@ -18,10 +21,10 @@ from app.domain.principal import TenantContext
 from app.modules.auth.service import validate_password_policy
 from app.modules.users.models import User
 from app.modules.users.rbac import sync_rbac
+from app.workers.maintenance import ensure_audit_partitions
+from app.workers.runner import JobRunner
 
 cli = typer.Typer(no_args_is_help=True)
-
-AUDIT_MONTHS_AHEAD = 3
 
 
 @cli.command("create-app-role")
@@ -43,13 +46,7 @@ async def _bootstrap() -> None:
     try:
         async with open_session(build_sessionmaker(engine), TenantContext.platform()) as s:
             await sync_rbac(s)
-            await s.execute(
-                text(
-                    "SELECT ensure_audit_partition((now() + (n || ' month')::interval)::date) "
-                    "FROM generate_series(0, :n) AS n"
-                ),
-                {"n": AUDIT_MONTHS_AHEAD},
-            )
+            await ensure_audit_partitions(s)
             await s.commit()
     finally:
         await engine.dispose()
@@ -104,6 +101,32 @@ def create_platform_user(
         raise typer.BadParameter("; ".join(e["message"] for e in exc.errors or [])) from exc
     asyncio.run(_create_platform_user(email, name, password, role))
     typer.echo(f"Platform user {email} ready with role {role}.")
+
+
+async def _run_worker() -> None:
+    settings = get_settings()
+    engine = build_engine(settings)
+    runner = JobRunner(build_sessionmaker(engine), settings)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError):  # Windows has no add_signal_handler
+            loop.add_signal_handler(sig, stop.set)
+    await runner.start()
+    try:
+        await stop.wait()
+    finally:
+        await runner.stop()
+        await engine.dispose()
+
+
+@cli.command("run-worker")
+def run_worker() -> None:
+    """Run background jobs in this process (set JOB_RUNNER_ENABLED=false on the API when you use this)."""
+    settings = get_settings()
+    configure_logging(settings.log_level, settings.log_json)
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_run_worker())
 
 
 if __name__ == "__main__":

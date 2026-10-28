@@ -9,13 +9,16 @@ from app.api.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
 from app.core.container import Container, build_container
 from app.core.exceptions import register_exception_handlers
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, get_logger
+from app.db.schema_check import schema_mismatch
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.audit.router import router as audit_router
 from app.modules.auth.router import router as auth_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.tenants.router import router as tenants_router
 from app.modules.users.router import router as users_router
+
+log = get_logger(__name__)
 
 
 def create_app(settings: Settings | None = None, container: Container | None = None) -> FastAPI:
@@ -25,8 +28,16 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        c: Container = app.state.container
+        # Fail fast with one clear message instead of SQL errors on every request and job poll.
+        if problem := await schema_mismatch(c.engine):
+            log.error("startup.schema_mismatch", detail=problem)
+            await c.engine.dispose()
+            raise RuntimeError(problem)
+        if c.settings.job_runner_enabled:
+            await c.job_runner.start()
         yield
-        await app.state.container.aclose()
+        await c.aclose()  # stops the runner first, then closes the pool
 
     app = FastAPI(
         title=f"{settings.app_name} API",
