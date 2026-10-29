@@ -16,7 +16,7 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
-    type_annotation_map = {dict[str, Any]: JSONB}
+    type_annotation_map = {dict[str, Any]: JSONB, list[dict[str, Any]]: JSONB}
 
 
 def pg_enum(enum_cls: type[StrEnum], name: str) -> Enum:

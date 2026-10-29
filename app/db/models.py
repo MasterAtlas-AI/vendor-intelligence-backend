@@ -8,6 +8,7 @@ from app.modules.audit.models import AuditLog
 from app.modules.auth.models import RefreshToken
 from app.modules.imports.models import ImportRow, Upload
 from app.modules.jobs.models import Job
+from app.modules.projects.models import Project, ProjectMember, ProjectVendor, Scorecard, ScorecardTemplate
 from app.modules.proposals.models import ApprovalHistory, KnowledgeProposal, ProposalItem
 from app.modules.search.models import SearchHistory, VendorEmbedding
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
@@ -42,10 +43,15 @@ __all__ = [
     "Job",
     "KnowledgeProposal",
     "Permission",
+    "Project",
+    "ProjectMember",
+    "ProjectVendor",
     "ProposalItem",
     "RefreshToken",
     "Role",
     "RolePermission",
+    "Scorecard",
+    "ScorecardTemplate",
     "SearchHistory",
     "ServiceCategory",
     "Tenant",

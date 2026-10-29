@@ -20,6 +20,7 @@ from app.modules.auth.router import router as auth_router
 from app.modules.discovery.router import router as discovery_router
 from app.modules.imports.router import router as imports_router
 from app.modules.jobs.router import router as jobs_router
+from app.modules.projects.router import router as projects_router
 from app.modules.proposals.router import router as proposals_router
 from app.modules.search.router import router as search_router
 from app.modules.taxonomy.router import router as taxonomy_router
@@ -102,6 +103,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         ai_router,
         discovery_router,
         search_router,
+        projects_router,
     ):
         v1.include_router(router)
     app.include_router(v1)
