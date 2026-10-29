@@ -4,6 +4,7 @@ from app.db.base import Base
 from app.modules.api_keys.models import ApiKey
 from app.modules.audit.models import AuditLog
 from app.modules.auth.models import RefreshToken
+from app.modules.imports.models import ImportRow, Upload
 from app.modules.jobs.models import Job
 from app.modules.proposals.models import ApprovalHistory, KnowledgeProposal, ProposalItem
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
@@ -32,6 +33,7 @@ __all__ = [
     "CertificationType",
     "EquipmentCategory",
     "FactSource",
+    "ImportRow",
     "Industry",
     "Job",
     "KnowledgeProposal",
@@ -43,6 +45,7 @@ __all__ = [
     "ServiceCategory",
     "Tenant",
     "TenantVendorLink",
+    "Upload",
     "User",
     "UserRole",
     "UserToken",

@@ -26,7 +26,7 @@ Design documents: [`../docs`](../docs/README.md)
 
 ## Status
 
-**Phase 1 (Foundation): done.** **Phase 2 (Vendor management): in progress.** Slices 1–2 of 5 are done: the knowledge base schema, taxonomy and vendor read APIs, then proposals and curator approvals. Excel import, PDF import and the vendor UI come next.
+**Phase 1 (Foundation): done.** **Phase 2 (Vendor management): in progress.** Slices 1–3 of 5 are done: the knowledge base schema, taxonomy and vendor read APIs; proposals and curator approvals; and the Excel import. PDF import and the vendor UI come next.
 
 ### Phase 1
 
@@ -50,6 +50,7 @@ Design documents: [`../docs`](../docs/README.md)
 | Vendor search & detail | Filter by free text (name, alias, website or description), country (HQ or any location), equipment or service category (with descendants), certification, industry and your own approval (AVL) status. Results are sorted alphabetically with cursor pagination. The detail view includes every fact. |
 | My vendors (tenant overlay) | Each organization keeps its own approval (AVL) status, internal vendor code, tags and notes for any global vendor, without copying it. Tenant-private under RLS, and audited. |
 | Proposals & approvals | The only way data enters the global knowledge base. A proposal is a new or existing vendor plus items: create vendor, add equipment, service, certification, project, location, industry, domain or alias, or change a field. Each item's payload is validated per action, and each can carry evidence (URL, title, snippet, page). Curators (`knowledge:approve`) can edit pending items, approve or reject them per item (rejections need a reason), or ask for more information. Optimistic locking (`version`) stops two curators overwriting each other. Approved items are written to the knowledge base in one transaction. Applying is idempotent per fact, and a website that already belongs to another vendor is refused, so the vendors get merged instead of duplicated. Evidence becomes `vendor_sources` and `fact_sources` rows, and every decision goes to `approval_history` and the audit log. Automated sources (Excel, PDF, AI) call the same service, optionally with automatic approval for trusted tenants. Tenants see their own proposals' status at `/proposals/mine`, never where other proposals came from. |
+| Excel import | Upload a vendor list (`.xlsx` or `.csv`, up to 10 MB / 5,000 rows; the file is stored in Postgres). The API detects the header row (even below a title), suggests a column mapping from the header names, and previews the first 20 rows with the predicted outcome of each. The import runs as a background job with live progress, in one transaction, so a crash or cancel leaves nothing half-done. For each row it matches the global knowledge base by website domain, then by exact company name or alias. A match joins the organization's own vendor list with the row's AVL status, vendor code, tags and notes; facts the knowledge base lacks (equipment, services, certifications, industries, aliases, missing country/city/description) are proposed for review. An unknown vendor becomes a new-vendor proposal, and joins the organization's list the moment a curator approves it. Trusted tenants' and curators' imports are approved automatically. Duplicates within the file, names that match several vendors, and vendors already awaiting review are detected. The report lists every row's outcome and reasons (`/imports/{job_id}/rows`, or as CSV). |
 | Normalisation | Company-name keys that drop legal forms ("Flowserve Corp." = "Flowserve"), registrable web domains from the bundled public-suffix list, and country names to ISO codes. These are the basis for duplicate detection in the Excel import. |
 
 ---
@@ -163,7 +164,9 @@ All settings are environment variables (or `.env` entries). They are defined in 
 | `JOB_CONCURRENCY` | `2` | Jobs run at once per runner |
 | `JOB_POLL_SECONDS` | `1.0` | How often an idle runner checks for new jobs (jobs created in the same process start immediately) |
 | `JOB_LEASE_SECONDS` | `120` | How long a claim lasts without renewal. After a crash, the job is retried about this long later |
-| `MAINTENANCE_INTERVAL_MINUTES` | `360` | Housekeeping interval (audit partitions, expired-token cleanup) |
+| `MAINTENANCE_INTERVAL_MINUTES` | `360` | Housekeeping interval (audit partitions, expired-token cleanup, linking approved imported vendors) |
+| `UPLOAD_MAX_BYTES` | `10485760` | Largest accepted upload (files are stored in Postgres) |
+| `IMPORT_MAX_ROWS` | `5000` | Rows read per import; the report says when a sheet had more |
 | `JWT_ALGORITHM` | `HS256` | `EdDSA`/`RS256` with `JWT_PRIVATE_KEY` + `JWT_PUBLIC_KEY` |
 | `JWT_SECRET` | — | At least 32 characters outside local/dev |
 | `JWT_KEY_ID` | `local-1` | Change when rotating signing keys |

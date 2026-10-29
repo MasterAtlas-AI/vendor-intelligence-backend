@@ -14,6 +14,7 @@ from app.db.schema_check import schema_mismatch
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.audit.router import router as audit_router
 from app.modules.auth.router import router as auth_router
+from app.modules.imports.router import router as imports_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.proposals.router import router as proposals_router
 from app.modules.taxonomy.router import router as taxonomy_router
@@ -81,6 +82,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         taxonomy_router,
         vendors_router,
         proposals_router,
+        imports_router,
     ):
         v1.include_router(router)
     app.include_router(v1)

@@ -160,3 +160,25 @@ class ApprovalAction(StrEnum):
     REQUEST_INFO = "request_info"
     AUTO_APPROVE = "auto_approve"
     EDIT = "edit"
+
+
+# ---------------------------------------------------------------- imports (Phase 2)
+
+
+class UploadKind(StrEnum):
+    SPREADSHEET = "spreadsheet"  # .xlsx / .xlsm / .csv
+    PDF = "pdf"
+
+
+class ImportRowOutcome(StrEnum):
+    """What an import did with one row of the file (shown in the import report)."""
+
+    MATCHED = "matched"  # an existing vendor: added to the tenant's list (new facts proposed separately)
+    CREATED = "created"  # a new vendor, auto-approved (trusted tenant) and added to the tenant's list
+    PROPOSED = "proposed"  # a new vendor proposal awaits curator review; linked to the tenant when approved
+    ALREADY_PROPOSED = (
+        "already_proposed"  # an open proposal for this vendor exists; linked when it's approved
+    )
+    DUPLICATE_IN_FILE = "duplicate_in_file"  # same vendor as an earlier row
+    AMBIGUOUS = "ambiguous"  # the name matches several vendors; add a website to disambiguate
+    INVALID = "invalid"  # the row can't be used (missing name, bad website/country, ...)

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 120
     maintenance_interval_minutes: int = 360
 
+    # Imports. Uploaded files are stored in Postgres (uploads.data), so keep them modest.
+    upload_max_bytes: int = 10 * 1024 * 1024
+    import_max_rows: int = 5000
+
     # Auth
     jwt_algorithm: Literal["HS256", "EdDSA", "RS256"] = "HS256"
     jwt_secret: SecretStr = SecretStr(_INSECURE_SECRET)

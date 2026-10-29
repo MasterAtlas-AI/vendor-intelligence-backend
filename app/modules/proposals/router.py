@@ -3,11 +3,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import PrincipalDep, SessionDep, require
+from app.api.deps import ContainerDep, PrincipalDep, SessionDep, require
 from app.core.exceptions import Forbidden
 from app.domain.enums import ProposalKind, ProposalOrigin, ProposalStatus
 from app.domain.permissions import P
 from app.domain.principal import Principal
+from app.modules.imports.linking import link_approved_imports
 from app.modules.proposals.models import KnowledgeProposal
 from app.modules.proposals.schemas import (
     Decision,
@@ -98,8 +99,12 @@ async def edit_item(
 
 
 @router.post("/admin/proposals/{proposal_id}/approve", response_model=ProposalDetail)
-async def approve(proposal_id: uuid.UUID, body: Decision, principal: Curator, svc: Svc) -> ProposalDetail:
+async def approve(
+    proposal_id: uuid.UUID, body: Decision, principal: Curator, svc: Svc, c: ContainerDep
+) -> ProposalDetail:
     proposal = await svc.approve(proposal_id, body.item_ids, body.note, body.version)
+    # A newly created vendor joins the lists of tenants who imported it (platform-mode, after the commit).
+    await link_approved_imports(c.sessionmaker, [proposal.id])
     return await _detail(svc, principal, proposal)
 
 

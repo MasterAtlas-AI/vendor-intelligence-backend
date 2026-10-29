@@ -47,6 +47,7 @@ class JobContext:
 
     def __init__(self, runner: "JobRunner", job: Job) -> None:
         self._runner = runner
+        self.settings = runner.settings
         self.job_id = job.id
         self.tenant_id = job.tenant_id
         self.user_id = job.user_id
@@ -60,8 +61,11 @@ class JobContext:
 
     async def progress(self, stage: str, progress: int) -> None:
         """Record progress (shown live via SSE). Raises JobCancelled if the user cancelled the job."""
+        # FOR NO KEY UPDATE, not FOR UPDATE: the handler's own open transaction holds FOR KEY SHARE on this row
+        # as soon as it inserts rows referencing the job (e.g. import_rows.job_id), and FOR UPDATE would wait on
+        # it forever while the handler waits on us.
         async with open_session(self._runner.sessionmaker, TenantContext.platform()) as s:
-            job = await s.get(Job, self.job_id, with_for_update=True)
+            job = await s.get(Job, self.job_id, with_for_update={"key_share": True})
             if job is None or job.locked_by != self._runner.worker_id or job.status != JobStatus.RUNNING:
                 raise JobLeaseLost
             if job.cancel_requested:
@@ -114,6 +118,7 @@ class JobRunner:
         from app.workers.handlers import HANDLERS  # local: handlers import feature modules
 
         self.sessionmaker = sessionmaker
+        self.settings = settings
         self._s = settings
         self._handlers = handlers if handlers is not None else HANDLERS
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
@@ -248,7 +253,7 @@ class JobRunner:
                 await heartbeat
 
         async with open_session(self.sessionmaker, TenantContext.platform()) as s:
-            job = await s.get(Job, job_id, with_for_update=True)
+            job = await s.get(Job, job_id, with_for_update={"key_share": True})
             if job is None or job.locked_by != self.worker_id or job.status != JobStatus.RUNNING:
                 log.warning("job.result_discarded", job_id=str(job_id), reason="lease no longer held")
                 return

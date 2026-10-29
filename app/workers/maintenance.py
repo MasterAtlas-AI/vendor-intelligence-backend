@@ -9,6 +9,7 @@ from app.core.logging import get_logger
 from app.db.session import open_session
 from app.domain.principal import TenantContext
 from app.modules.auth.models import RefreshToken
+from app.modules.imports.linking import link_approved_imports
 from app.modules.users.models import UserToken
 
 log = get_logger(__name__)
@@ -44,4 +45,6 @@ async def run_maintenance(sessionmaker: async_sessionmaker[AsyncSession]) -> boo
         purged_refresh_tokens=purged_refresh.rowcount,  # type: ignore[attr-defined]
         purged_user_tokens=purged_user.rowcount,  # type: ignore[attr-defined]
     )
+    # Safety net: imported vendors whose proposal was approved but not linked right away (e.g. a crash).
+    await link_approved_imports(sessionmaker)
     return True
