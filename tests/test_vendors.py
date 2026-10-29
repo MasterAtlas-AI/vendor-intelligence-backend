@@ -190,6 +190,9 @@ async def test_tenant_overlay_is_private(client: AsyncClient, factory: Factory, 
         "/api/v1/vendors", params={"avl_status": "approved"}, headers=manager_a.headers
     )
     assert str(vid) in {v["id"] for v in approved_a.json()["items"]}
+    mine_a = await client.get("/api/v1/vendors", params={"mine": "true"}, headers=manager_a.headers)
+    mine_b = await client.get("/api/v1/vendors", params={"mine": "true"}, headers=manager_b.headers)
+    assert [v["id"] for v in mine_a.json()["items"]] == [str(vid)] and mine_b.json()["items"] == []
 
     # Changes are audited in A's log only.
     logs = (

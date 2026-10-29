@@ -59,6 +59,7 @@ async def test_job_runs_to_completion_with_progress_stream(
     assert job["result"]["steps"] == 2
     events = await client.get(f"/api/v1/jobs/{job_id}/events", headers=admin.headers)
     assert "event: completed" in events.text
+    assert "no-transform" in events.headers["cache-control"]  # keeps compressing proxies from buffering it
 
 
 async def test_idempotency_key_returns_same_job(client: AsyncClient, factory: Factory) -> None:

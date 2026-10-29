@@ -41,6 +41,7 @@ async def search_vendors(
     ] = None,
     industry: Annotated[str | None, Query(max_length=60)] = None,
     avl_status: Annotated[AvlStatus | None, Query(description="Your organization's approval status")] = None,
+    mine: Annotated[bool, Query(description="Only vendors on your organization's own list")] = False,
     include_inactive: bool = False,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     cursor: str | None = None,
@@ -53,6 +54,7 @@ async def search_vendors(
         certification=certification,
         industry=industry,
         avl_status=avl_status,
+        mine=mine,
         include_inactive=include_inactive,
     )
     items, nxt = await svc.search(filters, limit=limit, cursor=cursor)

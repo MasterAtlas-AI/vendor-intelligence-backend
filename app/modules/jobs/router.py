@@ -95,7 +95,9 @@ async def job_events(
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        # no-transform: stops compressing proxies (e.g. the Next.js server in front of the API) from gzipping
+        # the stream, which buffers events until the job ends. X-Accel-Buffering does the same for nginx.
+        headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

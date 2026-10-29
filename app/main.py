@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import DBAPIError
 
 from app.api import health
 from app.api.middleware import RequestContextMiddleware
@@ -34,7 +35,17 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         c: Container = app.state.container
         # Fail fast with one clear message instead of SQL errors on every request and job poll.
-        if problem := await schema_mismatch(c.engine):
+        try:
+            problem = await schema_mismatch(c.engine)
+        except (DBAPIError, OSError) as exc:
+            host = c.engine.url.host
+            log.error("startup.database_unreachable", host=host, error=str(exc)[:300])
+            await c.engine.dispose()
+            raise RuntimeError(
+                f"Can't connect to the database at {host}. If it's on Render, check in the dashboard that the "
+                "database is available (not suspended) and that Access Control allows this machine's public IP."
+            ) from None
+        if problem:
             log.error("startup.schema_mismatch", detail=problem)
             await c.engine.dispose()
             raise RuntimeError(problem)

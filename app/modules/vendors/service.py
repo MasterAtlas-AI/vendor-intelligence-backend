@@ -54,6 +54,7 @@ class VendorFilters:
     certification: str | None = None
     industry: str | None = None
     avl_status: AvlStatus | None = None
+    mine: bool = False  # only vendors on the caller's own list (any AVL status)
     include_inactive: bool = False
 
 
@@ -185,17 +186,14 @@ class VendorQueryService:
                     .where(VendorIndustry.vendor_id == Vendor.id, Industry.code == f.industry)
                 )
             )
-        if f.avl_status:
+        if f.avl_status or f.mine:
             tenant_id = self._require_tenant()
-            stmt = stmt.where(
-                exists(
-                    select(1).where(
-                        TenantVendorLink.vendor_id == Vendor.id,
-                        TenantVendorLink.tenant_id == tenant_id,
-                        TenantVendorLink.avl_status == f.avl_status,
-                    )
-                )
+            on_list = select(1).where(
+                TenantVendorLink.vendor_id == Vendor.id, TenantVendorLink.tenant_id == tenant_id
             )
+            if f.avl_status:
+                on_list = on_list.where(TenantVendorLink.avl_status == f.avl_status)
+            stmt = stmt.where(exists(on_list))
         return stmt
 
     async def search(
