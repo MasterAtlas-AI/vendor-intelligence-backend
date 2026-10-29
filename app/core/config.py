@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # Imports. Uploaded files are stored in Postgres (uploads.data), so keep them modest.
     upload_max_bytes: int = 10 * 1024 * 1024
     import_max_rows: int = 5000
+    pdf_max_pages: int = 300
 
     # Auth
     jwt_algorithm: Literal["HS256", "EdDSA", "RS256"] = "HS256"

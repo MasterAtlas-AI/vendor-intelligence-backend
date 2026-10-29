@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.domain.enums import JobType
-from app.modules.imports.job import excel_import_handler
+from app.modules.imports.job import excel_import_handler, pdf_import_handler
 from app.workers.runner import Handler, JobContext
 
 
@@ -28,4 +28,5 @@ async def diagnostics_handler(ctx: JobContext) -> dict[str, Any]:
 HANDLERS: dict[str, Handler] = {
     JobType.DIAGNOSTICS: diagnostics_handler,
     JobType.EXCEL_IMPORT: excel_import_handler,
+    JobType.PDF_IMPORT: pdf_import_handler,
 }

@@ -1,4 +1,5 @@
-"""The `excel_import` job: reads the stored upload and runs every row through the importer.
+"""Import jobs. `excel_import` reads the stored upload and runs every row through the importer; `pdf_import`
+runs one vendor document through it.
 
 The whole import is one transaction: if the worker dies or the user cancels, nothing is kept and a re-run starts
 clean (the runner's at-least-once contract). Progress is written through separate short sessions, so it shows live
@@ -12,10 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import undefer
 
 from app.core.exceptions import NotFound
-from app.domain.enums import ActorType, AvlStatus, ImportRowOutcome
+from app.domain.enums import ActorType, AvlStatus, ImportRowOutcome, ProposalOrigin
 from app.modules.audit.service import record_audit
 from app.modules.imports.importer import ImportOptions, Taxonomy, VendorListImporter, parse_row
 from app.modules.imports.models import Upload
+from app.modules.imports.pdf_import import DOCUMENT_EVIDENCE, job_summary, read_and_extract, vendor_row
+from app.modules.imports.schemas import ImportOptionsIn, PdfVendor
 from app.modules.imports.service import read_upload
 from app.modules.imports.spreadsheet import HEADER_SCAN_ROWS, data_rows
 from app.workers.runner import JobContext
@@ -83,5 +86,60 @@ async def excel_import_handler(ctx: JobContext) -> dict[str, Any]:
             changes=summary,
         )
         await ctx.progress("saving", 97)
+        await s.commit()
+    return summary
+
+
+async def pdf_import_handler(ctx: JobContext) -> dict[str, Any]:
+    """The `pdf_import` job: extract facts from one vendor document and propose them for that vendor."""
+    inp = ctx.input
+    options_in = ImportOptionsIn.model_validate(inp["options"])
+    options = ImportOptions(default_avl_status=options_in.default_avl_status, tags=list(options_in.tags))
+    vendor = PdfVendor.model_validate(inp["vendor"])
+
+    await ctx.progress("reading", 5)
+    async with ctx.session() as s:
+        upload = await s.scalar(
+            select(Upload).where(Upload.id == uuid.UUID(inp["upload_id"])).options(undefer(Upload.data))
+        )
+        if upload is None:
+            raise NotFound("The uploaded file no longer exists")
+        taxonomy = await Taxonomy.load(s)
+        pdf, ex = await read_and_extract(upload.data, taxonomy, ctx.settings.pdf_max_pages)
+        await ctx.progress("extracting", 60)
+
+        row = await vendor_row(s, taxonomy, vendor, pdf, ex, inp.get("include"), options)
+        importer = VendorListImporter(
+            s,
+            taxonomy,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            job_id=ctx.job_id,
+            upload_id=upload.id,
+            auto_approve=bool(inp.get("auto_approve")),
+            options=options,
+            origin=ProposalOrigin.PDF,
+            evidence=DOCUMENT_EVIDENCE,
+        )
+        result = await importer.process(row)
+        summary = {
+            **job_summary(upload.id, upload.filename, pdf, ex, row),
+            "outcome": result.outcome.value,
+            "vendor_id": str(result.vendor_id) if result.vendor_id else None,
+            "proposal_id": str(result.proposal_id) if result.proposal_id else None,
+            "messages": result.messages,
+            "counts": {result.outcome.value: 1},
+        }
+        record_audit(
+            s,
+            "import.completed",
+            actor_type=ActorType.USER if ctx.user_id else ActorType.SYSTEM,
+            actor_id=ctx.user_id,
+            tenant_id=ctx.tenant_id,
+            entity_type="job",
+            entity_id=ctx.job_id,
+            changes={k: v for k, v in summary.items() if k != "messages"},
+        )
+        await ctx.progress("saving", 95)
         await s.commit()
     return summary

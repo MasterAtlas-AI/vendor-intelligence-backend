@@ -14,6 +14,8 @@ from app.modules.imports.schemas import (
     ImportRequest,
     ImportRowPage,
     ImportRowRead,
+    PdfImportRequest,
+    PdfPreview,
     UploadRead,
 )
 from app.modules.imports.service import ImportService
@@ -34,8 +36,9 @@ CHUNK = 1024 * 1024
 
 @router.post("/imports/uploads", response_model=UploadRead, status_code=status.HTTP_201_CREATED)
 async def upload_file(file: UploadFile, _: Uploader, svc: Svc, c: ContainerDep) -> UploadRead:
-    """Stores a vendor list (.xlsx or .csv) and returns its sheets, detected headers, sample rows and a
-    suggested column mapping. Nothing is imported yet."""
+    """Stores a vendor list (.xlsx or .csv) or a vendor document (.pdf). Spreadsheets come back with their
+    sheets, detected headers, sample rows and a suggested column mapping; PDFs with page count, whether they look
+    scanned, how many facts were found, and suggested vendor names and websites. Nothing is imported yet."""
     limit = c.settings.upload_max_bytes
     data = bytearray()
     while chunk := await file.read(CHUNK):
@@ -102,3 +105,25 @@ async def import_report_csv(job_id: uuid.UUID, _: Uploader, svc: Svc) -> Respons
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="import-{job_id}.csv"'},
     )
+
+
+@router.post("/imports/pdf/preview", response_model=PdfPreview)
+async def preview_pdf_import(body: PdfImportRequest, _: Uploader, svc: Svc) -> PdfPreview:
+    """Facts found in an uploaded vendor PDF (page and snippet for each), and, if `vendor` is given, what the
+    import would do with that vendor. Nothing is written."""
+    return await svc.preview_pdf(body)
+
+
+@router.post("/imports/pdf", response_model=JobAccepted, status_code=status.HTTP_202_ACCEPTED)
+async def start_pdf_import(
+    body: PdfImportRequest,
+    _: Uploader,
+    svc: Svc,
+    c: ContainerDep,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=128)] = None,
+) -> JobAccepted:
+    """Proposes the selected facts for the vendor (an existing one, or a new-vendor proposal) as a background
+    job. The report is at GET /imports/{job_id}/rows like a spreadsheet import, with one row."""
+    job = await svc.start_pdf(body, idempotency_key, c.job_runner.notify)
+    prefix = c.settings.api_prefix
+    return JobAccepted(job_id=job.id, status=job.status, events_url=f"{prefix}/jobs/{job.id}/events")

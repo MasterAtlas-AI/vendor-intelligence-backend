@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -27,7 +28,8 @@ class UploadRead(BaseModel):
     size_bytes: int
     sha256: str
     created_at: datetime
-    sheets: list[SheetInfo] = Field(default_factory=list)
+    sheets: list[SheetInfo] = Field(default_factory=list)  # spreadsheets
+    pdf: "PdfInfo | None" = None  # PDFs
 
 
 class ImportOptionsIn(BaseModel):
@@ -97,3 +99,69 @@ class ImportRowPage(BaseModel):
     next_cursor: str | None
     has_more: bool
     counts: dict[str, int]  # outcome -> count for the whole import
+
+
+# ---------------------------------------------------------------- PDF import
+
+
+class PdfInfo(BaseModel):
+    page_count: int
+    pages_read: int  # capped at PDF_MAX_PAGES
+    scanned: bool  # no usable text layer (OCR isn't supported yet)
+    facts_found: int
+    suggested_names: list[str]  # company names with a legal form, most frequent first
+    suggested_domains: list[str]  # websites/e-mail domains mentioned, most frequent first
+
+
+class PdfVendor(BaseModel):
+    """Whose document this is: an existing vendor, or a new one described by name (and ideally website)."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    vendor_id: uuid.UUID | None = None
+    name: str | None = Field(default=None, max_length=300)
+    website: str | None = Field(default=None, max_length=500)
+    country: str | None = Field(default=None, max_length=60)
+
+    @model_validator(mode="after")
+    def _identity(self) -> "PdfVendor":
+        if self.vendor_id is None and not self.name:
+            raise ValueError("give vendor_id (an existing vendor) or the vendor's name")
+        return self
+
+
+class PdfImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    upload_id: uuid.UUID
+    vendor: PdfVendor | None = None  # optional for the preview, required to import
+    include: list[str] | None = Field(
+        default=None, max_length=500, description="Candidate keys to propose; default: all found"
+    )
+    options: ImportOptionsIn = Field(default_factory=ImportOptionsIn)
+
+
+class PdfCandidate(BaseModel):
+    key: str  # "<kind>:<code>", used in `include`
+    kind: str  # equipment | services | certifications | industries
+    code: str
+    name: str
+    page: int
+    snippet: str
+    occurrences: int
+    confidence: Decimal
+    details: dict[str, Any]  # certificate_number / valid_to, when found next to a certification
+
+
+class PdfVendorMatch(BaseModel):
+    outcome: (
+        ImportRowOutcome  # predicted: matched / proposed / created / already_proposed / ambiguous / invalid
+    )
+    vendor_id: uuid.UUID | None
+    messages: list[str]
+
+
+class PdfPreview(PdfInfo):
+    candidates: list[PdfCandidate]
+    vendor: PdfVendorMatch | None  # only when the request named the vendor
+
+
+UploadRead.model_rebuild()  # resolves the forward reference to PdfInfo

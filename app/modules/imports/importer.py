@@ -16,6 +16,7 @@ leaves nothing behind and can simply be re-run.
 import re
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -101,6 +102,15 @@ def _term_key(value: str) -> str:
     return "".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
 
 
+def text_labels(kind: str, code: str, name: str, synonyms: list[str] | tuple[str, ...]) -> list[str]:
+    """How a taxonomy entry may be written in running text (PDF matching). Certification codes are how documents
+    usually name them ("ISO_9001" -> "ISO 9001", "API_Q1"); category codes are dot paths and never appear."""
+    labels = [name, *synonyms]
+    if kind == "certifications":
+        labels.append(code.replace("_", " "))
+    return labels
+
+
 @dataclass
 class _Vocabulary:
     by_key: dict[str, set[str]] = field(default_factory=dict)  # key -> codes
@@ -125,6 +135,8 @@ class Taxonomy:
         self.certifications = _Vocabulary()
         self.industries = _Vocabulary()
         self.ids: dict[tuple[str, str], uuid.UUID] = {}  # (kind, code) -> id
+        self.names: dict[tuple[str, str], str] = {}  # (kind, code) -> display name
+        self.labels: dict[str, list[tuple[str, list[str]]]] = {}  # kind -> [(code, [name, synonyms...])]
 
     @classmethod
     async def load(cls, session: AsyncSession) -> "Taxonomy":
@@ -139,6 +151,10 @@ class Taxonomy:
             for row in await session.scalars(select(model)):
                 vocab.add(row.code, row.code, row.name, *(row.synonyms or []))
                 tax.ids[(kind, row.code)] = row.id
+                tax.names[(kind, row.code)] = row.name
+                tax.labels.setdefault(kind, []).append(
+                    (row.code, text_labels(kind, row.code, row.name, row.synonyms or []))
+                )
         return tax
 
 
@@ -162,6 +178,12 @@ class ParsedRow:
     overlay: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     messages: list[str] = field(default_factory=list)
+    # Set when the user picked the vendor explicitly (PDF import): no matching by name/website.
+    vendor_id: uuid.UUID | None = None
+    # Per-fact extras, keyed by _fact_key: evidence (default: the importer's), confidence, extra payload fields.
+    evidence: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
+    confidence: dict[tuple[str, str], Decimal] = field(default_factory=dict)
+    extra: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
     @property
     def normalized_name(self) -> str:
@@ -286,7 +308,11 @@ class VendorListImporter:
         auto_approve: bool,
         options: ImportOptions,
         dry_run: bool = False,
+        origin: ProposalOrigin = ProposalOrigin.EXCEL,
+        evidence: list[dict[str, Any]] | None = None,
     ) -> None:
+        self.origin = origin
+        self.evidence = evidence or EVIDENCE  # default evidence for every proposed fact
         self.s = session
         self.tax = taxonomy
         self.tenant_id = tenant_id
@@ -347,6 +373,11 @@ class VendorListImporter:
 
     async def _match(self, row: ParsedRow) -> tuple[Vendor | None, str | None]:
         """(vendor, None) on a match; (None, reason) when ambiguous; (None, None) when the vendor is new."""
+        if row.vendor_id:
+            chosen = await self.s.get(Vendor, row.vendor_id)
+            if chosen is None or chosen.status == VendorStatus.RETIRED:
+                return None, "The chosen vendor no longer exists"
+            return chosen, None
         if row.domain and (vendor := await self._by_domain(row.domain)):
             return vendor, None
         candidates = await self._by_name(row.normalized_name)
@@ -365,24 +396,22 @@ class VendorListImporter:
 
     # ------------------------------------------------------------------ proposal items
 
+    def _item(self, row: ParsedRow, action: ProposalItemAction, payload: dict[str, Any]) -> NewItem:
+        key = _fact_key(action, payload)
+        return NewItem(
+            action,
+            {**payload, **row.extra.get(key, {})},
+            row.evidence.get(key, self.evidence),
+            row.confidence.get(key),
+        )
+
     def _fact_items(self, row: ParsedRow) -> list[NewItem]:
-        items = [NewItem(ProposalItemAction.ADD_ALIAS, {"alias": a}, EVIDENCE) for a in row.aliases]
-        items += [
-            NewItem(ProposalItemAction.ADD_EQUIPMENT, {"category_code": code, "name": name}, EVIDENCE)
-            for code, name in row.equipment
-        ]
-        items += [
-            NewItem(ProposalItemAction.ADD_SERVICE, {"category_code": code, "name": name}, EVIDENCE)
-            for code, name in row.services
-        ]
-        items += [
-            NewItem(ProposalItemAction.ADD_CERTIFICATION, {"certification_code": code}, EVIDENCE)
-            for code in row.certifications
-        ]
-        items += [
-            NewItem(ProposalItemAction.ADD_INDUSTRY, {"industry_code": code}, EVIDENCE)
-            for code in row.industries
-        ]
+        A = ProposalItemAction  # noqa: N806 - local alias
+        items = [self._item(row, A.ADD_ALIAS, {"alias": a}) for a in row.aliases]
+        items += [self._item(row, A.ADD_EQUIPMENT, {"category_code": c, "name": n}) for c, n in row.equipment]
+        items += [self._item(row, A.ADD_SERVICE, {"category_code": c, "name": n}) for c, n in row.services]
+        items += [self._item(row, A.ADD_CERTIFICATION, {"certification_code": c}) for c in row.certifications]
+        items += [self._item(row, A.ADD_INDUSTRY, {"industry_code": c}) for c in row.industries]
         return items
 
     def _new_vendor_items(self, row: ParsedRow) -> list[NewItem]:
@@ -393,13 +422,13 @@ class VendorListImporter:
             "hq_city": row.city,
             "description": row.description,
         }
-        return [NewItem(ProposalItemAction.CREATE_VENDOR, create, EVIDENCE), *self._fact_items(row)]
+        return [NewItem(ProposalItemAction.CREATE_VENDOR, create, self.evidence), *self._fact_items(row)]
 
     async def _missing_fact_items(self, vendor: Vendor, row: ParsedRow) -> list[NewItem]:
         """Items for facts in the row that the vendor doesn't have yet."""
         items: list[NewItem] = []
         if row.domain and not vendor.domains:
-            items.append(NewItem(ProposalItemAction.ADD_DOMAIN, {"domain": row.domain}, EVIDENCE))
+            items.append(self._item(row, ProposalItemAction.ADD_DOMAIN, {"domain": row.domain}))
         for fld, value in (
             ("hq_country", row.country),
             ("hq_city", row.city),
@@ -407,7 +436,7 @@ class VendorListImporter:
         ):
             if value and not getattr(vendor, fld):
                 items.append(
-                    NewItem(ProposalItemAction.UPDATE_VENDOR_FIELD, {"field": fld, "value": value}, EVIDENCE)
+                    self._item(row, ProposalItemAction.UPDATE_VENDOR_FIELD, {"field": fld, "value": value})
                 )
 
         known_aliases = {a.normalized_alias for a in vendor.aliases} | {vendor.normalized_name}
@@ -436,6 +465,9 @@ class VendorListImporter:
                 c for c in row.certifications if self.tax.ids[("certifications", c)] not in have_ct
             ],
             industries=[c for c in row.industries if self.tax.ids[("industries", c)] not in have_in],
+            evidence=row.evidence,
+            confidence=row.confidence,
+            extra=row.extra,
         )
         items += self._fact_items(missing)
         if not items:
@@ -460,7 +492,7 @@ class VendorListImporter:
         async with self.s.begin_nested():
             return await self.proposals.submit(
                 kind,
-                ProposalOrigin.EXCEL,
+                self.origin,
                 items,
                 subject_vendor_id=subject_vendor_id,
                 origin_tenant_id=self.tenant_id,

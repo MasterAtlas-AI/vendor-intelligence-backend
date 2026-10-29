@@ -15,15 +15,26 @@ from sqlalchemy.orm import undefer
 
 from app.core.config import Settings
 from app.core.exceptions import NotFound, ValidationFailed
-from app.domain.enums import ImportRowOutcome, JobType, UploadKind
+from app.domain.enums import ImportRowOutcome, JobType, ProposalOrigin, UploadKind, VendorStatus
 from app.domain.permissions import P
 from app.domain.principal import Principal
 from app.modules.audit.service import record_audit
 from app.modules.imports.importer import ImportOptions, Taxonomy, VendorListImporter, parse_row
 from app.modules.imports.models import ImportRow, Upload
+from app.modules.imports.pdf_import import (
+    DOCUMENT_EVIDENCE,
+    candidates,
+    pdf_info,
+    read_and_extract,
+    vendor_row,
+)
 from app.modules.imports.schemas import (
     ImportPreview,
     ImportRequest,
+    PdfImportRequest,
+    PdfInfo,
+    PdfPreview,
+    PdfVendorMatch,
     PreviewRow,
     SheetInfo,
     UploadRead,
@@ -43,12 +54,13 @@ from app.modules.imports.spreadsheet import (
 from app.modules.jobs.models import Job
 from app.modules.jobs.service import JobService
 from app.modules.tenants.models import Tenant
+from app.modules.vendors.models import Vendor
 
 SAMPLE_ROWS = 5
 PREVIEW_ROWS = 20
 
 
-def options_from(request: ImportRequest) -> ImportOptions:
+def options_from(request: ImportRequest | PdfImportRequest) -> ImportOptions:
     return ImportOptions(
         default_avl_status=request.options.default_avl_status, tags=list(request.options.tags)
     )
@@ -115,29 +127,41 @@ class ImportService:
 
     async def create_upload(self, filename: str, content_type: str | None, data: bytes) -> UploadRead:
         filename = (filename or "upload").replace("\\", "/").rsplit("/", 1)[-1][:255]
-        if extension(filename) not in SPREADSHEET_EXTENSIONS:
+        ext = extension(filename)
+        if ext not in SPREADSHEET_EXTENSIONS and ext != ".pdf":
             raise ValidationFailed(
-                "Upload an Excel workbook (.xlsx) or a CSV file",
+                "Upload an Excel workbook (.xlsx), a CSV file or a PDF",
                 errors=[{"field": "file", "message": f"unsupported file type: {filename}"}],
             )
         if not data:
             raise ValidationFailed("The file is empty", errors=[{"field": "file", "message": "empty file"}])
-        limit = self._read_limit
-        book = await anyio.to_thread.run_sync(lambda: read_spreadsheet(data, filename, max_rows=limit))
-        sheets = [self._sheet_info(sheet) for sheet in book.sheets]
-        if not any(s.data_rows for s in sheets):
-            raise ValidationFailed(
-                "The file has no data rows", errors=[{"field": "file", "message": "no rows"}]
-            )
+        if ext == ".pdf":
+            kind = UploadKind.PDF
+            pdf, ex = await read_and_extract(data, await Taxonomy.load(self.s), self.settings.pdf_max_pages)
+            if not pdf.page_count:
+                raise ValidationFailed(
+                    "The PDF has no pages", errors=[{"field": "file", "message": "no pages"}]
+                )
+            meta: dict[str, Any] = {"pdf": pdf_info(pdf, ex).model_dump()}
+        else:
+            kind = UploadKind.SPREADSHEET
+            limit = self._read_limit
+            book = await anyio.to_thread.run_sync(lambda: read_spreadsheet(data, filename, max_rows=limit))
+            sheets = [self._sheet_info(sheet) for sheet in book.sheets]
+            if not any(s.data_rows for s in sheets):
+                raise ValidationFailed(
+                    "The file has no data rows", errors=[{"field": "file", "message": "no rows"}]
+                )
+            meta = {"sheets": [s.model_dump() for s in sheets]}
 
         upload = Upload(
             tenant_id=self.principal.tenant_id,
-            kind=UploadKind.SPREADSHEET,
+            kind=kind,
             filename=filename,
             content_type=(content_type or "application/octet-stream")[:120],
             size_bytes=len(data),
             sha256=hashlib.sha256(data).hexdigest(),
-            meta={"sheets": [s.model_dump() for s in sheets]},
+            meta=meta,
             data=data,
         )
         self.s.add(upload)
@@ -164,15 +188,24 @@ class ImportService:
             sha256=upload.sha256,
             created_at=upload.created_at,
             sheets=[SheetInfo.model_validate(s) for s in upload.meta.get("sheets", [])],
+            pdf=PdfInfo.model_validate(upload.meta["pdf"]) if "pdf" in upload.meta else None,
         )
 
-    async def _upload(self, upload_id: uuid.UUID, *, with_data: bool = False) -> Upload:
+    async def _upload(
+        self, upload_id: uuid.UUID, *, with_data: bool = False, kind: UploadKind | None = None
+    ) -> Upload:
         stmt = select(Upload).where(Upload.id == upload_id)
         if with_data:
             stmt = stmt.options(undefer(Upload.data))
         upload = await self.s.scalar(stmt)  # RLS keeps other tenants' uploads invisible
         if upload is None:
             raise NotFound("Upload not found")
+        if kind is not None and upload.kind != kind:
+            expected = "a spreadsheet (.xlsx/.csv)" if kind == UploadKind.SPREADSHEET else "a PDF"
+            raise ValidationFailed(
+                f"This import needs {expected}",
+                errors=[{"field": "upload_id", "message": f"the upload is a {upload.kind.value}"}],
+            )
         return upload
 
     async def get_upload(self, upload_id: uuid.UUID) -> UploadRead:
@@ -182,7 +215,7 @@ class ImportService:
 
     async def preview(self, request: ImportRequest) -> ImportPreview:
         """Dry run on the first rows: shows how cells map and what the import would do, without writing."""
-        upload = await self._upload(request.upload_id, with_data=True)
+        upload = await self._upload(request.upload_id, with_data=True, kind=UploadKind.SPREADSHEET)
         book = await read_upload(upload, self._read_limit)
         sheet, header_row, names = resolve_sheet(book, request)
         all_rows, _ = data_rows(sheet, header_row, self.settings.import_max_rows)
@@ -227,7 +260,7 @@ class ImportService:
     async def start(
         self, request: ImportRequest, idempotency_key: str | None, notify_runner: Callable[[], None]
     ) -> Job:
-        upload = await self._upload(request.upload_id, with_data=True)
+        upload = await self._upload(request.upload_id, with_data=True, kind=UploadKind.SPREADSHEET)
         book = await read_upload(upload, self._read_limit)
         _, header_row, _ = resolve_sheet(book, request)  # fail fast on a bad sheet/header/mapping
         payload: dict[str, Any] = {
@@ -245,11 +278,81 @@ class ImportService:
             JobType.EXCEL_IMPORT, payload, idempotency_key
         )
 
+    # ------------------------------------------------------------------ PDF
+
+    async def preview_pdf(self, request: PdfImportRequest) -> PdfPreview:
+        """The facts found in the document, with page and snippet; plus, when the vendor is named, what the
+        import would do with it. Nothing is written."""
+        upload = await self._upload(request.upload_id, with_data=True, kind=UploadKind.PDF)
+        taxonomy = await Taxonomy.load(self.s)
+        pdf, ex = await read_and_extract(upload.data, taxonomy, self.settings.pdf_max_pages)
+        match: PdfVendorMatch | None = None
+        if request.vendor is not None:
+            options = options_from(request)
+            row = await vendor_row(self.s, taxonomy, request.vendor, pdf, ex, request.include, options)
+            auto = await may_auto_approve(self.s, self.principal)
+            importer = self._pdf_importer(taxonomy, upload.id, None, options, dry_run=True, auto_approve=auto)
+            result = await importer.process(row)
+            match = PdfVendorMatch(
+                outcome=result.outcome, vendor_id=result.vendor_id, messages=result.messages
+            )
+        await self.s.rollback()
+        return PdfPreview(**pdf_info(pdf, ex).model_dump(), candidates=candidates(ex, taxonomy), vendor=match)
+
+    def _pdf_importer(
+        self,
+        taxonomy: Taxonomy,
+        upload_id: uuid.UUID,
+        job_id: uuid.UUID | None,
+        options: ImportOptions,
+        *,
+        dry_run: bool,
+        auto_approve: bool = False,
+    ) -> VendorListImporter:
+        return VendorListImporter(
+            self.s,
+            taxonomy,
+            tenant_id=self.principal.tenant_id,
+            user_id=self.principal.user_id,
+            job_id=job_id,
+            upload_id=upload_id,
+            auto_approve=auto_approve,
+            options=options,
+            dry_run=dry_run,
+            origin=ProposalOrigin.PDF,
+            evidence=DOCUMENT_EVIDENCE,
+        )
+
+    async def start_pdf(
+        self, request: PdfImportRequest, idempotency_key: str | None, notify_runner: Callable[[], None]
+    ) -> Job:
+        if request.vendor is None:
+            raise ValidationFailed(
+                "Say whose document this is",
+                errors=[{"field": "vendor", "message": "give vendor_id or the vendor's name"}],
+            )
+        upload = await self._upload(request.upload_id, kind=UploadKind.PDF)
+        if request.vendor.vendor_id:
+            vendor = await self.s.get(Vendor, request.vendor.vendor_id)
+            if vendor is None or vendor.status == VendorStatus.RETIRED:
+                raise NotFound("Vendor not found")
+        payload: dict[str, Any] = {
+            "upload_id": str(upload.id),
+            "filename": upload.filename,
+            "vendor": request.vendor.model_dump(mode="json"),
+            "include": request.include,
+            "options": request.options.model_dump(mode="json"),
+            "auto_approve": await may_auto_approve(self.s, self.principal),
+        }
+        return await JobService(self.s, self.principal, notify_runner).create(
+            JobType.PDF_IMPORT, payload, idempotency_key
+        )
+
     # ------------------------------------------------------------------ report
 
     async def _import_job(self, job_id: uuid.UUID) -> Job:
         job = await JobService(self.s, self.principal, lambda: None).get(job_id)
-        if job.type != JobType.EXCEL_IMPORT:
+        if job.type not in (JobType.EXCEL_IMPORT, JobType.PDF_IMPORT):
             raise NotFound("Import not found")
         return job
 
