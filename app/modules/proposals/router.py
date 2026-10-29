@@ -21,6 +21,7 @@ from app.modules.proposals.schemas import (
     RequestInfo,
 )
 from app.modules.proposals.service import NewItem, ProposalService, summarize
+from app.modules.vendors.merge import finish_merges
 from app.modules.vendors.service import VendorQueryService
 
 router = APIRouter(tags=["proposals"])
@@ -105,6 +106,8 @@ async def approve(
     proposal = await svc.approve(proposal_id, body.item_ids, body.note, body.version)
     # A newly created vendor joins the lists of tenants who imported it (platform-mode, after the commit).
     await link_approved_imports(c.sessionmaker, [proposal.id])
+    if proposal.kind == ProposalKind.MERGE_VENDORS:
+        await finish_merges(c.sessionmaker)  # organizations' own records follow the merge (platform mode)
     return await _detail(svc, principal, proposal)
 
 

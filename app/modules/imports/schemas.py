@@ -92,6 +92,7 @@ class ImportRowRead(BaseModel):
     proposal_id: uuid.UUID | None
     overlay: dict[str, Any]
     messages: list[str]
+    details: dict[str, Any] = Field(default_factory=dict)  # AI discovery: website, highlights, sources
 
 
 class ImportRowPage(BaseModel):

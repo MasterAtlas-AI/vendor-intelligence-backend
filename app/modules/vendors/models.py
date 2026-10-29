@@ -59,6 +59,8 @@ class Vendor(Entity, Base):
         pg_enum(VendorStatus, "vendor_status"), default=VendorStatus.ACTIVE
     )
     parent_vendor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vendors.id", ondelete="SET NULL"))
+    # Set when this record was a duplicate folded into another one (status becomes retired).
+    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vendors.id", ondelete="SET NULL"))
     data_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     knowledge_version: Mapped[int] = mapped_column(Integer, default=1)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

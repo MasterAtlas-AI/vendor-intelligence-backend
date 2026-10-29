@@ -48,6 +48,7 @@ from app.modules.vendors.models import (
     VendorDomain,
     VendorEquipment,
     VendorIndustry,
+    VendorProject,
     VendorService,
 )
 
@@ -175,6 +176,7 @@ class ParsedRow:
     services: list[tuple[str, str]] = field(default_factory=list)
     certifications: list[str] = field(default_factory=list)  # codes
     industries: list[str] = field(default_factory=list)  # codes
+    projects: list[dict[str, Any]] = field(default_factory=list)  # add_project payloads
     overlay: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     messages: list[str] = field(default_factory=list)
@@ -184,6 +186,14 @@ class ParsedRow:
     evidence: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
     confidence: dict[tuple[str, str], Decimal] = field(default_factory=dict)
     extra: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    # Evidence for facts without their own (and for create_vendor); default: the importer's.
+    default_evidence: list[dict[str, Any]] | None = None
+    # Set by automated sources (AI discovery) to record a candidate that was looked at but not proposed.
+    discarded: str | None = None
+    # Free-form details shown in the report (AI discovery: website, country, highlights, sources).
+    details: dict[str, Any] = field(default_factory=dict)
+    # Propose replacing HQ country/city that differ from the knowledge base (default: only fill missing ones).
+    propose_changes: bool = False
 
     @property
     def normalized_name(self) -> str:
@@ -282,6 +292,8 @@ def _fact_key(action: ProposalItemAction, payload: dict[str, Any]) -> tuple[str,
     }.get(action)
     if action == ProposalItemAction.ADD_ALIAS:
         return action.value, normalize_name(str(payload.get("alias", "")))
+    if action == ProposalItemAction.ADD_PROJECT:
+        return action.value, normalize_name(str(payload.get("project_name", "")))
     return action.value, str(payload.get(key, "")) if key else ""
 
 
@@ -310,8 +322,11 @@ class VendorListImporter:
         dry_run: bool = False,
         origin: ProposalOrigin = ProposalOrigin.EXCEL,
         evidence: list[dict[str, Any]] | None = None,
+        link_to_tenant: bool = True,
     ) -> None:
         self.origin = origin
+        # Imports put vendors on the organization's own list; discovery only finds them.
+        self.link_to_tenant = link_to_tenant
         self.evidence = evidence or EVIDENCE  # default evidence for every proposed fact
         self.s = session
         self.tax = taxonomy
@@ -371,7 +386,7 @@ class VendorListImporter:
             )
         )
 
-    async def _match(self, row: ParsedRow) -> tuple[Vendor | None, str | None]:
+    async def match(self, row: ParsedRow) -> tuple[Vendor | None, str | None]:
         """(vendor, None) on a match; (None, reason) when ambiguous; (None, None) when the vendor is new."""
         if row.vendor_id:
             chosen = await self.s.get(Vendor, row.vendor_id)
@@ -392,7 +407,39 @@ class VendorListImporter:
         if len(candidates) > 1:
             names = ", ".join(sorted(f"{v.display_name} ({v.hq_country or '?'})" for v in candidates)[:5])
             return None, f"Matches several vendors: {names}. Add a website or country to pick one"
-        return None, None
+        return await self._fuzzy(row), None
+
+    async def _fuzzy(self, row: ParsedRow) -> Vendor | None:
+        """Near-identical names (trigram similarity >= SAME) are the same vendor unless the websites disagree;
+        the grey zone is only reported, so a curator (or the AI, in discovery) decides."""
+        from app.modules.vendors.dedup import (  # local import: avoids an import cycle
+            GREY,
+            SAME,
+            similar_vendors,
+        )
+
+        compatible = [
+            sim for sim in await similar_vendors(self.s, row.name, min_similarity=GREY)
+            if not (row.domain and sim.vendor.domains and row.domain not in {d.domain for d in sim.vendor.domains})
+            and not (row.country and sim.vendor.hq_country and row.country != sim.vendor.hq_country)
+        ]  # fmt: skip
+        if compatible and compatible[0].similarity >= SAME:
+            row.details["matched_by"] = f"similar name ({compatible[0].similarity:.2f})"
+            return compatible[0].vendor
+        if compatible:
+            row.details["possible_duplicates"] = [
+                {
+                    "vendor_id": str(c.vendor.id),
+                    "name": c.vendor.display_name,
+                    "similarity": round(c.similarity, 2),
+                }
+                for c in compatible[:3]
+            ]
+            best = compatible[0]
+            row.messages.append(
+                f"Possibly the same company as {best.vendor.display_name} (name similarity {best.similarity:.2f})"
+            )
+        return None
 
     # ------------------------------------------------------------------ proposal items
 
@@ -401,7 +448,7 @@ class VendorListImporter:
         return NewItem(
             action,
             {**payload, **row.extra.get(key, {})},
-            row.evidence.get(key, self.evidence),
+            row.evidence.get(key, row.default_evidence or self.evidence),
             row.confidence.get(key),
         )
 
@@ -412,6 +459,7 @@ class VendorListImporter:
         items += [self._item(row, A.ADD_SERVICE, {"category_code": c, "name": n}) for c, n in row.services]
         items += [self._item(row, A.ADD_CERTIFICATION, {"certification_code": c}) for c in row.certifications]
         items += [self._item(row, A.ADD_INDUSTRY, {"industry_code": c}) for c in row.industries]
+        items += [self._item(row, A.ADD_PROJECT, p) for p in row.projects]
         return items
 
     def _new_vendor_items(self, row: ParsedRow) -> list[NewItem]:
@@ -422,7 +470,8 @@ class VendorListImporter:
             "hq_city": row.city,
             "description": row.description,
         }
-        return [NewItem(ProposalItemAction.CREATE_VENDOR, create, self.evidence), *self._fact_items(row)]
+        evidence = row.default_evidence or self.evidence
+        return [NewItem(ProposalItemAction.CREATE_VENDOR, create, evidence), *self._fact_items(row)]
 
     async def _missing_fact_items(self, vendor: Vendor, row: ParsedRow) -> list[NewItem]:
         """Items for facts in the row that the vendor doesn't have yet."""
@@ -434,7 +483,16 @@ class VendorListImporter:
             ("hq_city", row.city),
             ("description", row.description),
         ):
-            if value and not getattr(vendor, fld):
+            current = getattr(vendor, fld)
+            conflict = row.propose_changes and fld != "description" and current and value
+            if conflict and str(value).strip().lower() != str(current).strip().lower():
+                row.details.setdefault("conflicts", []).append(
+                    {"field": fld, "current": current, "found": value}
+                )
+                items.append(
+                    self._item(row, ProposalItemAction.UPDATE_VENDOR_FIELD, {"field": fld, "value": value})
+                )
+            elif value and not current:
                 items.append(
                     self._item(row, ProposalItemAction.UPDATE_VENDOR_FIELD, {"field": fld, "value": value})
                 )
@@ -456,6 +514,15 @@ class VendorListImporter:
             else set()
         )
         have_in = await ids(VendorIndustry.industry_id, VendorIndustry) if row.industries else set()
+        have_pr = (
+            {normalize_name(n) for n in await self.s.scalars(
+                select(VendorProject.project_name).where(
+                    VendorProject.vendor_id == vendor.id, VendorProject.status == FactStatus.APPROVED
+                )
+            )}
+            if row.projects
+            else set()
+        )  # fmt: skip
         missing = ParsedRow(
             row_number=row.row_number,
             aliases=aliases,
@@ -465,9 +532,13 @@ class VendorListImporter:
                 c for c in row.certifications if self.tax.ids[("certifications", c)] not in have_ct
             ],
             industries=[c for c in row.industries if self.tax.ids[("industries", c)] not in have_in],
+            projects=[
+                p for p in row.projects if normalize_name(str(p.get("project_name", ""))) not in have_pr
+            ],
             evidence=row.evidence,
             confidence=row.confidence,
             extra=row.extra,
+            default_evidence=row.default_evidence,
         )
         items += self._fact_items(missing)
         if not items:
@@ -519,6 +590,7 @@ class VendorListImporter:
                     proposal_id=result.proposal_id,
                     overlay=row.overlay,
                     messages=result.messages,
+                    details=row.details,
                 )
             )
         return result
@@ -527,6 +599,8 @@ class VendorListImporter:
         name = row.name
         if row.error:
             return RowResult(row.row_number, ImportRowOutcome.INVALID, name, messages=[row.error])
+        if row.discarded:
+            return RowResult(row.row_number, ImportRowOutcome.DISCARDED, name, messages=[row.discarded])
 
         first = self._seen.setdefault(row.dedupe_key, row.row_number)
         if first != row.row_number:
@@ -537,7 +611,7 @@ class VendorListImporter:
                 messages=[f"Same vendor as row {first}; skipped"],
             )
 
-        vendor, ambiguity = await self._match(row)
+        vendor, ambiguity = await self.match(row)
         if ambiguity:
             return RowResult(row.row_number, ImportRowOutcome.AMBIGUOUS, name, messages=[ambiguity])
 
@@ -548,7 +622,7 @@ class VendorListImporter:
                 if items:
                     result.messages.append(f"{len(items)} new fact(s) will be proposed")
                 return result
-            if self.tenant_id:
+            if self.tenant_id and self.link_to_tenant:
                 await upsert_overlay(self.s, self.tenant_id, vendor.id, row.overlay)
             if items:
                 try:
@@ -572,7 +646,10 @@ class VendorListImporter:
                 ImportRowOutcome.ALREADY_PROPOSED,
                 name,
                 proposal_id=None if self.dry_run else open_id,
-                messages=["This vendor is already awaiting review; it joins your list once approved"],
+                messages=[
+                    "This vendor is already awaiting review"
+                    + ("; it joins your list once approved" if self.link_to_tenant else "")
+                ],
             )
 
         if self.dry_run:
@@ -588,7 +665,7 @@ class VendorListImporter:
                 messages=[f"Couldn't propose this vendor: {exc.detail or exc.title}"],
             )
         if proposal.status == ProposalStatus.AUTO_APPROVED and proposal.subject_vendor_id:
-            if self.tenant_id:
+            if self.tenant_id and self.link_to_tenant:
                 await upsert_overlay(self.s, self.tenant_id, proposal.subject_vendor_id, row.overlay)
             return RowResult(
                 row.row_number,
@@ -603,5 +680,5 @@ class VendorListImporter:
             ImportRowOutcome.PROPOSED,
             name,
             proposal_id=proposal.id,
-            messages=["Sent for review; joins your list once approved"],
+            messages=["Sent for review" + ("; joins your list once approved" if self.link_to_tenant else "")],
         )

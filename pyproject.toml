@@ -21,6 +21,8 @@ dependencies = [
     "tldextract>=5.1",
     "openpyxl>=3.1",
     "pypdf>=5.1",
+    "openai>=1.60",
+    "httpx>=0.28",
 ]
 
 [project.optional-dependencies]

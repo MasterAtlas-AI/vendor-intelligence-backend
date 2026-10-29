@@ -14,10 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.logging import get_logger
 from app.db.session import open_session
-from app.domain.enums import ActorType, AvlStatus, ProposalKind
+from app.domain.enums import ActorType, AvlStatus, JobType, ProposalKind
 from app.domain.principal import TenantContext
 from app.modules.audit.service import record_audit
 from app.modules.imports.models import ImportRow
+from app.modules.jobs.models import Job
 from app.modules.proposals.models import KnowledgeProposal
 from app.modules.tenant_vendors.models import TenantVendorLink
 
@@ -57,7 +58,10 @@ async def link_approved_imports(
         stmt = (
             select(ImportRow, KnowledgeProposal.subject_vendor_id)
             .join(KnowledgeProposal, KnowledgeProposal.id == ImportRow.proposal_id)
+            # Only imports add vendors to the organization's list; AI discovery rows just report findings.
+            .join(Job, Job.id == ImportRow.job_id)
             .where(
+                Job.type.in_([JobType.EXCEL_IMPORT, JobType.PDF_IMPORT]),
                 ImportRow.vendor_id.is_(None),
                 ImportRow.proposal_id.is_not(None),
                 KnowledgeProposal.kind == ProposalKind.NEW_VENDOR,

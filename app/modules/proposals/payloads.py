@@ -5,6 +5,7 @@ when a curator edits it, so the applier only ever sees well-formed data. Taxonom
 (stable, human-readable) and are resolved to ids at apply time.
 """
 
+import uuid
 from datetime import date
 from typing import Annotated, Any, Literal
 
@@ -154,6 +155,14 @@ class AddProject(_Payload):
     _country = field_validator("country")(_country)
 
 
+class MergeVendor(_Payload):
+    """Fold `duplicate_vendor_id` into the proposal's subject vendor (the one that stays)."""
+
+    duplicate_vendor_id: uuid.UUID
+    similarity: float | None = Field(default=None, ge=0, le=1)
+    reason: str = Field(default="", max_length=1000)
+
+
 PAYLOADS: dict[ProposalItemAction, type[_Payload]] = {
     ProposalItemAction.CREATE_VENDOR: CreateVendor,
     ProposalItemAction.UPDATE_VENDOR_FIELD: UpdateVendorField,
@@ -165,6 +174,7 @@ PAYLOADS: dict[ProposalItemAction, type[_Payload]] = {
     ProposalItemAction.ADD_SERVICE: AddService,
     ProposalItemAction.ADD_CERTIFICATION: AddCertification,
     ProposalItemAction.ADD_PROJECT: AddProject,
+    ProposalItemAction.MERGE_VENDOR: MergeVendor,
 }
 
 

@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import Conflict, ValidationFailed
-from app.domain.enums import LocationType, ProposalItemAction, SourceKind, VendorStatus
+from app.domain.enums import FactStatus, LocationType, ProposalItemAction, SourceKind, VendorStatus
 from app.domain.normalization import normalize_name, registrable_domain
 from app.modules.proposals.models import ProposalItem
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
@@ -95,6 +95,14 @@ class Applier:
                 )
                 self.s.add(source)
                 await self.s.flush()
+            elif await self.s.scalar(
+                select(FactSource.id).where(
+                    FactSource.fact_table == fact_table,
+                    FactSource.fact_id == fact_id,
+                    FactSource.source_id == source.id,
+                )
+            ):
+                continue  # this page already backs this fact (e.g. the same vendor researched again)
             self.s.add(
                 FactSource(
                     fact_table=fact_table,
@@ -128,6 +136,7 @@ class Applier:
                 ProposalItemAction.ADD_SERVICE: self._add_service,
                 ProposalItemAction.ADD_CERTIFICATION: self._add_certification,
                 ProposalItemAction.ADD_PROJECT: self._add_project,
+                ProposalItemAction.MERGE_VENDOR: self._merge_vendor,
             }[action]
             result = await handler(vendor, p)
             vendor.knowledge_version += 1
@@ -320,3 +329,119 @@ class Applier:
             self.s.add(row)
             await self.s.flush()
         return Applied("vendor_projects", row.id, vendor.id)
+
+    # ------------------------------------------------------------------ merging duplicates
+
+    async def _merge_vendor(self, target: Vendor, p: dict[str, Any]) -> Applied:
+        """Folds the duplicate into `target`: every global fact, domain, alias and source moves (facts the target
+        already has are retired and their evidence re-pointed), then the duplicate is retired with
+        merged_into_id = target. Tenant-private rows (organizations' own records, import reports) are moved
+        afterwards in platform mode by app.modules.vendors.merge.finish_merges, because RLS hides them here."""
+        dup = await self.s.get(Vendor, uuid.UUID(str(p["duplicate_vendor_id"])), with_for_update=True)
+        if dup is None or dup.id == target.id:
+            raise Conflict("The duplicate vendor doesn't exist", code="vendor_missing")
+        if dup.status == VendorStatus.RETIRED:
+            raise Conflict(f"{dup.display_name} was already merged or retired", code="already_merged")
+        moved = 0
+
+        # Domains are unique across the knowledge base, so they can simply move.
+        for d in list(await self.s.scalars(select(VendorDomain).where(VendorDomain.vendor_id == dup.id))):
+            d.vendor_id, d.is_primary = target.id, d.is_primary and not target.domains
+            moved += 1
+
+        # Names: the duplicate's own names and aliases become aliases of the target.
+        known = {a.normalized_alias for a in target.aliases} | {target.normalized_name}
+        for alias in list(await self.s.scalars(select(VendorAlias).where(VendorAlias.vendor_id == dup.id))):
+            if alias.normalized_alias in known:
+                await self.s.delete(alias)
+            else:
+                alias.vendor_id = target.id
+                known.add(alias.normalized_alias)
+        for name in (dup.display_name, dup.legal_name):
+            if (key := normalize_name(name)) and key not in known:
+                self.s.add(
+                    VendorAlias(
+                        vendor_id=target.id, alias=name[:300], normalized_alias=key, alias_type="former"
+                    )
+                )
+                known.add(key)
+
+        # Facts with a natural key: keep the target's, retire the duplicate's and re-point its evidence.
+        keyed: list[tuple[str, Any, Any]] = [
+            ("vendor_equipment", VendorEquipment, VendorEquipment.category_id),
+            ("vendor_services", VendorService, VendorService.category_id),
+            ("vendor_certifications", VendorCertification, VendorCertification.certification_type_id),
+            ("vendor_projects", VendorProject, func.lower(VendorProject.project_name)),
+        ]
+        for table, model, key_col in keyed:
+            existing = {
+                k: fid
+                for fid, k in (
+                    await self.s.execute(
+                        select(model.id, key_col).where(
+                            model.vendor_id == target.id, model.status == FactStatus.APPROVED
+                        )
+                    )
+                ).all()
+            }
+            for fact in list(await self.s.scalars(select(model).where(model.vendor_id == dup.id))):
+                fact_key = (await self.s.execute(select(key_col).where(model.id == fact.id))).scalar()
+                if fact.status == FactStatus.APPROVED and fact_key in existing:
+                    await self._repoint_evidence(table, fact.id, existing[fact_key])
+                    fact.status = FactStatus.RETIRED
+                else:
+                    fact.vendor_id = target.id
+                    moved += 1
+        for loc in list(
+            await self.s.scalars(select(VendorLocation).where(VendorLocation.vendor_id == dup.id))
+        ):
+            loc.vendor_id = target.id
+        industries = set(
+            await self.s.scalars(
+                select(VendorIndustry.industry_id).where(VendorIndustry.vendor_id == target.id)
+            )
+        )
+        for link in list(
+            await self.s.scalars(select(VendorIndustry).where(VendorIndustry.vendor_id == dup.id))
+        ):
+            if link.industry_id not in industries:
+                self.s.add(VendorIndustry(vendor_id=target.id, industry_id=link.industry_id))
+            await self.s.delete(link)
+        for source in list(
+            await self.s.scalars(select(VendorSource).where(VendorSource.vendor_id == dup.id))
+        ):
+            source.vendor_id = target.id
+
+        # Open proposals about the duplicate now concern the target.
+        from app.modules.proposals.models import KnowledgeProposal
+
+        for proposal in await self.s.scalars(
+            select(KnowledgeProposal).where(KnowledgeProposal.subject_vendor_id == dup.id)
+        ):
+            proposal.subject_vendor_id = target.id
+
+        for fld in ("website", "hq_country", "hq_city", "description"):
+            if not getattr(target, fld) and getattr(dup, fld):
+                setattr(target, fld, getattr(dup, fld))
+        dup.status, dup.merged_into_id = VendorStatus.RETIRED, target.id
+        dup.knowledge_version += 1
+        await self.s.flush()
+        return Applied("vendors", dup.id, target.id)
+
+    async def _repoint_evidence(self, table: str, from_id: uuid.UUID, to_id: uuid.UUID) -> None:
+        have = set(
+            await self.s.scalars(
+                select(FactSource.source_id).where(
+                    FactSource.fact_table == table, FactSource.fact_id == to_id
+                )
+            )
+        )
+        for fs in list(
+            await self.s.scalars(
+                select(FactSource).where(FactSource.fact_table == table, FactSource.fact_id == from_id)
+            )
+        ):
+            if fs.source_id in have:
+                await self.s.delete(fs)
+            else:
+                fs.fact_id = to_id

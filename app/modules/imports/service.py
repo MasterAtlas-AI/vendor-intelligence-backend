@@ -57,6 +57,9 @@ from app.modules.tenants.models import Tenant
 from app.modules.vendors.models import Vendor
 
 SAMPLE_ROWS = 5
+# Jobs whose per-row results live in import_rows (imports and AI discovery runs).
+REPORT_JOB_TYPES = {JobType.EXCEL_IMPORT, JobType.PDF_IMPORT, JobType.VENDOR_DISCOVERY, JobType.EQUIPMENT_DISCOVERY,
+                    JobType.SERVICE_DISCOVERY, JobType.ENRICHMENT}  # fmt: skip
 PREVIEW_ROWS = 20
 
 
@@ -352,7 +355,7 @@ class ImportService:
 
     async def _import_job(self, job_id: uuid.UUID) -> Job:
         job = await JobService(self.s, self.principal, lambda: None).get(job_id)
-        if job.type not in (JobType.EXCEL_IMPORT, JobType.PDF_IMPORT):
+        if job.type not in REPORT_JOB_TYPES:
             raise NotFound("Import not found")
         return job
 

@@ -39,6 +39,33 @@ class Settings(BaseSettings):
     import_max_rows: int = 5000
     pdf_max_pages: int = 300
 
+    # AI (Phase 3). With no OPENAI_API_KEY the AI features report "not configured" instead of failing at startup.
+    ai_provider: Literal["openai", "disabled"] = "openai"
+    openai_api_key: SecretStr | None = None
+    openai_model: str = "gpt-5-mini"
+    openai_base_url: str | None = None  # e.g. an Azure OpenAI or proxy endpoint
+    openai_timeout_seconds: float = 180.0
+    ai_max_retries: int = 3  # for rate limits, timeouts and 5xx; other errors fail at once
+    # Prices used for cost metering, in US$. Check them against the provider's price list for `openai_model`.
+    ai_price_input_per_mtok: float = 0.25
+    ai_price_cached_input_per_mtok: float = 0.025
+    ai_price_output_per_mtok: float = 2.00
+    ai_price_per_web_search: float = 0.01
+    # Web search cost controls: searches the model may run per call, and how much result text it reads.
+    ai_max_searches_per_call: int = 3
+    ai_search_context_size: Literal["low", "medium", "high"] = "low"
+    # Monthly AI spending limits. Per organization: tenants.quotas["ai_monthly_usd"] overrides the default.
+    ai_default_monthly_budget_usd: float = 25.0
+    ai_platform_monthly_budget_usd: float = 100.0  # curators and super admins working outside an organization
+
+    # Web crawler (vendor websites for discovery). Polite by default: robots.txt, one request per site per second.
+    crawler_user_agent: str = "MasterAtlasBot/0.1 (+https://masteratlas.ai/bot; vendor research)"
+    crawler_timeout_seconds: float = 20.0
+    crawler_max_bytes: int = 8 * 1024 * 1024  # larger responses are cut off and discarded
+    crawler_min_delay_seconds: float = 1.0  # between requests to the same site
+    crawler_max_crawl_delay_seconds: float = 10.0  # cap on a site's robots.txt Crawl-delay
+    crawler_cache_days: int = 7  # a stored page younger than this is reused without a request
+
     # Auth
     jwt_algorithm: Literal["HS256", "EdDSA", "RS256"] = "HS256"
     jwt_secret: SecretStr = SecretStr(_INSECURE_SECRET)

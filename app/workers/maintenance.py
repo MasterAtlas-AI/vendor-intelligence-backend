@@ -11,6 +11,7 @@ from app.domain.principal import TenantContext
 from app.modules.auth.models import RefreshToken
 from app.modules.imports.linking import link_approved_imports
 from app.modules.users.models import UserToken
+from app.modules.vendors.merge import finish_merges
 
 log = get_logger(__name__)
 
@@ -47,4 +48,5 @@ async def run_maintenance(sessionmaker: async_sessionmaker[AsyncSession]) -> boo
     )
     # Safety net: imported vendors whose proposal was approved but not linked right away (e.g. a crash).
     await link_approved_imports(sessionmaker)
+    await finish_merges(sessionmaker)
     return True

@@ -5,6 +5,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import DBAPIError
 
+from app.ai.service import register_ai_error_handler
 from app.api import health
 from app.api.middleware import RequestContextMiddleware
 from app.core.config import Settings, get_settings
@@ -12,9 +13,11 @@ from app.core.container import Container, build_container
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.db.schema_check import schema_mismatch
+from app.modules.ai.router import router as ai_router
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.audit.router import router as audit_router
 from app.modules.auth.router import router as auth_router
+from app.modules.discovery.router import router as discovery_router
 from app.modules.imports.router import router as imports_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.proposals.router import router as proposals_router
@@ -81,6 +84,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
     )
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
+    register_ai_error_handler(app)
 
     v1 = APIRouter(prefix=settings.api_prefix)
     for router in (
@@ -94,6 +98,8 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         vendors_router,
         proposals_router,
         imports_router,
+        ai_router,
+        discovery_router,
     ):
         v1.include_router(router)
     app.include_router(v1)

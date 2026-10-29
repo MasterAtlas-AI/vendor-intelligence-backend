@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, suppress
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -30,6 +30,9 @@ from app.db.session import open_session
 from app.domain.enums import JobStatus
 from app.domain.principal import TenantContext
 from app.modules.jobs.models import Job
+
+if TYPE_CHECKING:
+    from app.ai.service import AiService
 
 log = get_logger(__name__)
 
@@ -48,11 +51,17 @@ class JobContext:
     def __init__(self, runner: "JobRunner", job: Job) -> None:
         self._runner = runner
         self.settings = runner.settings
+        self.ai = runner.ai  # AiService (None only in runners built without one, e.g. some tests)
         self.job_id = job.id
         self.tenant_id = job.tenant_id
         self.user_id = job.user_id
         self.attempt = job.attempts
         self.input: dict[str, Any] = dict(job.input)
+
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        """For helpers that open their own short sessions (e.g. the crawler's page cache)."""
+        return self._runner.sessionmaker
 
     def session(self) -> AbstractAsyncContextManager[AsyncSession]:
         """A session confined to the job's tenant (platform jobs get platform mode)."""
@@ -114,11 +123,13 @@ class JobRunner:
         sessionmaker: async_sessionmaker[AsyncSession],
         settings: Settings,
         handlers: Mapping[str, Handler] | None = None,
+        ai: "AiService | None" = None,
     ) -> None:
         from app.workers.handlers import HANDLERS  # local: handlers import feature modules
 
         self.sessionmaker = sessionmaker
         self.settings = settings
+        self.ai = ai
         self._s = settings
         self._handlers = handlers if handlers is not None else HANDLERS
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"

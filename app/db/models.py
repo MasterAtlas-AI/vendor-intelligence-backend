@@ -1,5 +1,7 @@
 """Imports every model so `Base.metadata` is complete (Alembic, relationship resolution)."""
 
+from app.ai.models import AiUsageEvent
+from app.crawler.models import WebPage
 from app.db.base import Base
 from app.modules.api_keys.models import ApiKey
 from app.modules.audit.models import AuditLog
@@ -26,6 +28,7 @@ from app.modules.vendors.models import (
 )
 
 __all__ = [
+    "AiUsageEvent",
     "ApiKey",
     "ApprovalHistory",
     "AuditLog",
@@ -59,4 +62,5 @@ __all__ = [
     "VendorProject",
     "VendorService",
     "VendorSource",
+    "WebPage",
 ]

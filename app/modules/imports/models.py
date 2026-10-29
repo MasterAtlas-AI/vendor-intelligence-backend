@@ -57,3 +57,6 @@ class ImportRow(Entity, Base):
     # The tenant's own fields from the row (AVL status, code, tags, notes), applied once the vendor exists.
     overlay: Mapped[dict[str, Any]] = mapped_column(default=dict)
     messages: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        default=dict
+    )  # AI discovery: website, highlights, sources

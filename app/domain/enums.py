@@ -111,6 +111,7 @@ class AvlStatus(StrEnum):
 class ProposalKind(StrEnum):
     NEW_VENDOR = "new_vendor"  # creates a vendor (first item is create_vendor)
     UPDATE_VENDOR = "update_vendor"  # adds or changes facts on an existing vendor
+    MERGE_VENDORS = "merge_vendors"  # two records are the same company: fold one into the other
 
 
 class ProposalOrigin(StrEnum):
@@ -120,6 +121,7 @@ class ProposalOrigin(StrEnum):
     AI_VENDOR_DISCOVERY = "ai_vendor_discovery"
     AI_EQUIPMENT_DISCOVERY = "ai_equipment_discovery"
     SUGGESTION = "suggestion"  # a tenant user's correction
+    DEDUP_SCAN = "dedup_scan"  # the duplicate scan job
 
 
 class ProposalStatus(StrEnum):
@@ -146,6 +148,7 @@ class ProposalItemAction(StrEnum):
     ADD_SERVICE = "add_service"
     ADD_CERTIFICATION = "add_certification"
     ADD_PROJECT = "add_project"
+    MERGE_VENDOR = "merge_vendor"  # payload: duplicate_vendor_id -> folded into the proposal's subject vendor
 
 
 class ProposalItemStatus(StrEnum):
@@ -182,3 +185,4 @@ class ImportRowOutcome(StrEnum):
     DUPLICATE_IN_FILE = "duplicate_in_file"  # same vendor as an earlier row
     AMBIGUOUS = "ambiguous"  # the name matches several vendors; add a website to disambiguate
     INVALID = "invalid"  # the row can't be used (missing name, bad website/country, ...)
+    DISCARDED = "discarded"  # AI discovery: looked at, not proposed (not relevant, no evidence, unreachable)

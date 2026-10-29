@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.ai.service import AiService, build_provider
 from app.core.config import Settings
 from app.core.security import JwtManager
 from app.db.session import build_engine, build_sessionmaker
@@ -21,6 +22,7 @@ class Container:
     rate_limiter: RateLimiter
     email: EmailSender
     job_runner: JobRunner
+    ai: AiService
 
     async def aclose(self) -> None:
         await self.job_runner.stop()
@@ -30,6 +32,7 @@ class Container:
 def build_container(settings: Settings) -> Container:
     engine = build_engine(settings)
     sessionmaker = build_sessionmaker(engine)
+    ai = AiService(sessionmaker, settings, build_provider(settings))
     return Container(
         settings=settings,
         engine=engine,
@@ -37,5 +40,6 @@ def build_container(settings: Settings) -> Container:
         jwt=JwtManager(settings),
         rate_limiter=InMemoryRateLimiter(),
         email=build_email_sender(settings),
-        job_runner=JobRunner(sessionmaker, settings),
+        job_runner=JobRunner(sessionmaker, settings, ai=ai),
+        ai=ai,
     )
