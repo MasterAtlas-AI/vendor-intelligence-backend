@@ -33,6 +33,7 @@ from app.db.session import open_session
 from app.domain.enums import ProposalItemAction, ProposalKind, ProposalOrigin, ProposalStatus
 from app.domain.normalization import registrable_domain
 from app.domain.principal import TenantContext
+from app.modules.imports.models import ImportRow
 from app.modules.jobs.models import Job
 from app.modules.proposals.models import KnowledgeProposal
 from app.modules.proposals.service import NewItem, ProposalService
@@ -246,14 +247,20 @@ BRIEF: dict[str, Any] = {
 async def test_discovery_run(
     client: AsyncClient, factory: Factory, container: Container, real_ai: Any
 ) -> None:
-    engineer = await factory.user(await _eval_tenant(container, factory), ["engineer"])
+    tenant = await _eval_tenant(container, factory)
+    engineer = await factory.user(tenant, ["engineer"])
     estimate = (await client.post(f"{API}/discovery/estimate", json=BRIEF, headers=engineer.headers)).json()
     started = time.monotonic()
     job = await _run_job(client, container, engineer, "/discovery/vendors", BRIEF)
     minutes = (time.monotonic() - started) / 60
     assert job["status"] == "succeeded", job
-    rows = (await client.get(f"{API}/discovery/runs/{job['id']}/results", params={"limit": 200},
-                             headers=engineer.headers)).json()["items"]  # fmt: skip
+    # Straight from the database: results are visible to the run's own user only, whose token may have expired.
+    async with open_session(container.sessionmaker, TenantContext.platform()) as s:
+        rows: list[dict[str, Any]] = [
+            {"outcome": r.outcome.value, "vendor_name": r.vendor_name, "details": r.details, "messages": r.messages}
+            for r in await s.scalars(select(ImportRow).where(ImportRow.job_id == uuid.UUID(job["id"]))
+                                     .order_by(ImportRow.row_number))
+        ]  # fmt: skip
     cost = float(job["cost_usd"] or 0)
     lines = [
         f"# Vendor discovery run, {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",

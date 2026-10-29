@@ -24,6 +24,7 @@ from app.modules.jobs.router import router as jobs_router
 from app.modules.projects.router import router as projects_router
 from app.modules.proposals.router import router as proposals_router
 from app.modules.quality.router import router as quality_router
+from app.modules.rfqs.router import router as rfqs_router
 from app.modules.search.router import router as search_router
 from app.modules.taxonomy.router import router as taxonomy_router
 from app.modules.tenants.router import router as tenants_router
@@ -108,6 +109,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         projects_router,
         assistant_router,
         quality_router,
+        rfqs_router,
     ):
         v1.include_router(router)
     app.include_router(v1)
