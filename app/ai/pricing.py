@@ -17,3 +17,8 @@ def call_cost(usage: Usage, settings: Settings) -> Decimal:
         + Decimal(usage.web_search_calls) * Decimal(str(settings.ai_price_per_web_search))
     )
     return cost.quantize(MICRO, rounding=ROUND_HALF_UP)
+
+
+def embedding_cost(usage: Usage, settings: Settings) -> Decimal:
+    cost = Decimal(usage.input_tokens) * Decimal(str(settings.ai_price_embedding_per_mtok)) / MTOK
+    return cost.quantize(MICRO, rounding=ROUND_HALF_UP)

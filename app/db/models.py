@@ -9,6 +9,7 @@ from app.modules.auth.models import RefreshToken
 from app.modules.imports.models import ImportRow, Upload
 from app.modules.jobs.models import Job
 from app.modules.proposals.models import ApprovalHistory, KnowledgeProposal, ProposalItem
+from app.modules.search.models import SearchHistory, VendorEmbedding
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
 from app.modules.tenant_vendors.models import TenantVendorLink
 from app.modules.tenants.models import Tenant
@@ -45,6 +46,7 @@ __all__ = [
     "RefreshToken",
     "Role",
     "RolePermission",
+    "SearchHistory",
     "ServiceCategory",
     "Tenant",
     "TenantVendorLink",
@@ -56,6 +58,7 @@ __all__ = [
     "VendorAlias",
     "VendorCertification",
     "VendorDomain",
+    "VendorEmbedding",
     "VendorEquipment",
     "VendorIndustry",
     "VendorLocation",

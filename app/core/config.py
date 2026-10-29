@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     ai_price_cached_input_per_mtok: float = 0.025
     ai_price_output_per_mtok: float = 2.00
     ai_price_per_web_search: float = 0.01
+    # Embeddings (Phase 4 search). The dimension is fixed by the vendor_embeddings column (migration 0014).
+    openai_embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    ai_price_embedding_per_mtok: float = 0.02
     # Web search cost controls: searches the model may run per call, and how much result text it reads.
     ai_max_searches_per_call: int = 3
     ai_search_context_size: Literal["low", "medium", "high"] = "low"
@@ -65,6 +69,9 @@ class Settings(BaseSettings):
     crawler_min_delay_seconds: float = 1.0  # between requests to the same site
     crawler_max_crawl_delay_seconds: float = 10.0  # cap on a site's robots.txt Crawl-delay
     crawler_cache_days: int = 7  # a stored page younger than this is reused without a request
+    # Supplier sites researched in parallel by a discovery run (each site still gets one request per second). A
+    # 25-candidate run measured 12.9 min at 5; each site costs one AI extraction call, so watch provider rate limits.
+    discovery_research_concurrency: int = 10
 
     # Auth
     jwt_algorithm: Literal["HS256", "EdDSA", "RS256"] = "HS256"

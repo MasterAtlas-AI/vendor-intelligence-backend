@@ -5,9 +5,10 @@ from fastapi import APIRouter, Depends, Query, status
 
 from app.api.deps import ContainerDep, PrincipalDep, SessionDep, require
 from app.core.exceptions import Forbidden
+from app.db.session import open_session
 from app.domain.enums import ProposalKind, ProposalOrigin, ProposalStatus
 from app.domain.permissions import P
-from app.domain.principal import Principal
+from app.domain.principal import Principal, TenantContext
 from app.modules.imports.linking import link_approved_imports
 from app.modules.proposals.models import KnowledgeProposal
 from app.modules.proposals.schemas import (
@@ -21,6 +22,7 @@ from app.modules.proposals.schemas import (
     RequestInfo,
 )
 from app.modules.proposals.service import NewItem, ProposalService, summarize
+from app.modules.search.indexing import queue_refresh_if_stale
 from app.modules.vendors.merge import finish_merges
 from app.modules.vendors.service import VendorQueryService
 
@@ -108,6 +110,11 @@ async def approve(
     await link_approved_imports(c.sessionmaker, [proposal.id])
     if proposal.kind == ProposalKind.MERGE_VENDORS:
         await finish_merges(c.sessionmaker)  # organizations' own records follow the merge (platform mode)
+    if c.ai.configured:  # refresh search vectors for what just changed
+        async with open_session(c.sessionmaker, TenantContext.platform()) as s:
+            if await queue_refresh_if_stale(s):
+                await s.commit()
+                c.job_runner.notify()
     return await _detail(svc, principal, proposal)
 
 

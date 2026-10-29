@@ -14,6 +14,7 @@ The AI only proposes. Nothing it finds is approved automatically, whatever the o
 """
 
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -43,7 +44,6 @@ from app.workers.runner import JobContext
 log = get_logger(__name__)
 
 SEARCH_CONCURRENCY = 5  # ~37 s per search call (measured): 10 queries in ~1.5 min
-RESEARCH_CONCURRENCY = 5  # sites in parallel; each site still gets one request per second
 PAGE_TEXT_BUDGET = 40_000  # characters of site text sent to the AI per vendor
 MIN_CONFIDENCE = 0.5
 AI_EVIDENCE = [{"kind": "ai", "title": "AI vendor discovery"}]
@@ -105,6 +105,12 @@ def page_payload(pages: list[Page], budget: int = PAGE_TEXT_BUDGET) -> list[dict
         out.append({"url": page.url, "title": page.title, "text": text})
         left -= len(text)
     return out
+
+
+def flag_suspicious(row: ParsedRow, pages: list[Page]) -> None:
+    """Lists pages where instruction-like text was removed before the AI read them, for the curator's attention."""
+    if flagged := [p.url for p in pages if p.suspicious]:
+        row.details["suspicious_pages"] = flagged[:20]
 
 
 def build_row(
@@ -240,9 +246,17 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
         tax = await Taxonomy.load(s)
     criteria = criteria_for(req, tax)
     focus = focus_terms(req, tax)
+    began, timings = (
+        time.monotonic(),
+        dict[str, int](),
+    )  # seconds from the start of the run to each stage, for tuning
+
+    async def progress(stage: str, percent: int) -> None:
+        timings.setdefault(stage, round(time.monotonic() - began))
+        await ctx.progress(stage, percent)
 
     # 1. plan
-    await ctx.progress("planning", 3)
+    await progress("planning", 3)
     count = query_count(req)
     plan = await ai.run(PLAN, SearchPlan, call, criteria=criteria, count=count)
     queries = list(dict.fromkeys(q.strip()[:200] for q in plan.output.queries if q.strip()))[:count]
@@ -250,7 +264,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
         raise AIError("The AI returned no search queries")
 
     # 2. search
-    await ctx.progress("searching", 8)
+    await progress("searching", 8)
     findings: list[tuple[list[Any], list[Citation]]] = []
     failed: list[str] = []
     sem = asyncio.Semaphore(SEARCH_CONCURRENCY)
@@ -268,7 +282,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
                 failed.append(query)
                 return
             findings.append((res.output.companies, res.citations))
-            await ctx.progress("searching", 8 + int(27 * (len(findings) + len(failed)) / len(queries)))
+            await progress("searching", 8 + int(27 * (len(findings) + len(failed)) / len(queries)))
 
     await asyncio.gather(*(search(q) for q in queries))
     if not findings:
@@ -277,7 +291,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
     kept, dropped = consolidate(findings, limit=req.max_candidates, allow_distributors=wants_distributors)
 
     # 3. match against the knowledge base
-    await ctx.progress("matching", 36)
+    await progress("matching", 36)
     researched = [Researched(c) for c in kept]
     async with ctx.session() as s:
         probe = VendorListImporter(s, tax, tenant_id=ctx.tenant_id, user_id=ctx.user_id, job_id=None, upload_id=None,
@@ -307,7 +321,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
                    and (r.vendor_id is None or req.include_existing)]  # fmt: skip
     budget_hit = False
     done = 0
-    sem = asyncio.Semaphore(RESEARCH_CONCURRENCY)
+    sem = asyncio.Semaphore(ctx.settings.discovery_research_concurrency)
     async with make_fetcher(ctx.settings) as fetcher:
         crawler = Crawler(fetcher, ctx.settings, ctx.sessionmaker)
 
@@ -336,13 +350,13 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
                     except AIError as exc:
                         r.cand.discarded = f"Couldn't analyse its website: {str(exc)[:200]}"
                 done += 1
-                await ctx.progress("researching", 40 + int(45 * done / max(len(to_research), 1)))
+                await progress("researching", 40 + int(45 * done / max(len(to_research), 1)))
 
-        await ctx.progress("researching", 40)
+        await progress("researching", 40)
         await asyncio.gather(*(research(r) for r in to_research))
 
     # 7-8. evidence check and classification
-    await ctx.progress("classifying", 88)
+    await progress("classifying", 88)
     pending = [t for r in to_research for t in pending_terms(r, tax)]
     codes: dict[tuple[str, str], str] = {}
     if pending and not budget_hit:
@@ -367,6 +381,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
                 + [(p.final_url, p.title, p.text) for p in r.pages]
             )
             row, _ = build_row(r, tax, codes, check)
+            flag_suspicious(row, r.pages)
             if r.cand.discarded and not row.discarded:
                 row.discarded = r.cand.discarded
             if r.vendor_id is not None and r not in to_research:
@@ -379,7 +394,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
         rows.append(row)
 
     # 9. propose
-    await ctx.progress("proposing", 94)
+    await progress("proposing", 94)
     async with ctx.session() as s:
         importer = VendorListImporter(
             s, tax, tenant_id=ctx.tenant_id, user_id=ctx.user_id, job_id=ctx.job_id, upload_id=None,
@@ -400,6 +415,7 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
             "pages_read": sum(len(r.pages) for r in researched),
             "budget_ran_out": budget_hit,
             "counts": {k: v for k, v in counts.items() if v},
+            "stage_started_s": timings | {"done": round(time.monotonic() - began)},
         }
         record_audit(s, "discovery.completed", actor_type=ActorType.USER if ctx.user_id else ActorType.SYSTEM,
                      actor_id=ctx.user_id, tenant_id=ctx.tenant_id, entity_type="job", entity_id=ctx.job_id,

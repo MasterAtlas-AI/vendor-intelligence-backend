@@ -6,7 +6,7 @@ import openai
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from app.ai.ports import AIError, AINotConfigured, AIRetryable, Citation, LLMResult, Usage
+from app.ai.ports import AIError, AINotConfigured, AIRetryable, Citation, EmbeddingResult, LLMResult, Usage
 from app.core.config import Settings
 
 T = TypeVar("T", bound=BaseModel)
@@ -50,6 +50,27 @@ def refusal_from(response: Any) -> str | None:
     return None
 
 
+def translate(exc: openai.OpenAIError) -> AIError:
+    """SDK errors -> our error types: bad credentials, retryable (rate limit, timeout, 5xx), or a plain failure."""
+    if isinstance(exc, openai.AuthenticationError):
+        return AINotConfigured("OpenAI rejected the API key")
+    if isinstance(exc, openai.PermissionDeniedError):
+        return AINotConfigured(f"OpenAI denied access: {exc.message}")
+    if isinstance(
+        exc,
+        (
+            openai.RateLimitError,
+            openai.APITimeoutError,
+            openai.APIConnectionError,
+            openai.InternalServerError,
+        ),
+    ):
+        return AIRetryable(f"{type(exc).__name__}: {exc}")
+    if isinstance(exc, openai.APIStatusError):
+        return AIError(f"OpenAI error {exc.status_code}: {exc.message}")
+    return AIError(f"OpenAI error: {exc}")
+
+
 class OpenAIProvider:
     name = "openai"
 
@@ -57,6 +78,8 @@ class OpenAIProvider:
         self.model = settings.openai_model
         self.max_searches = settings.ai_max_searches_per_call
         self.search_context_size = settings.ai_search_context_size
+        self.embedding_model = settings.openai_embedding_model
+        self.embedding_dimensions = settings.embedding_dimensions
         if client is None:
             if settings.openai_api_key is None:
                 raise AINotConfigured("OPENAI_API_KEY is not set")
@@ -77,6 +100,7 @@ class OpenAIProvider:
         web_search: bool = False,
         allowed_domains: list[str] | None = None,
         max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResult[T]:
         tools: list[dict[str, Any]] = []
         if web_search:
@@ -96,21 +120,12 @@ class OpenAIProvider:
             kwargs["max_tool_calls"] = self.max_searches  # each search costs money and adds result tokens
         if max_output_tokens:
             kwargs["max_output_tokens"] = max_output_tokens
+        if reasoning_effort and self.model.startswith(("gpt-5", "o")):  # only reasoning models take it
+            kwargs["reasoning"] = {"effort": reasoning_effort}
         try:
             response = await self.client.responses.parse(**kwargs)
-        except openai.AuthenticationError as exc:
-            raise AINotConfigured("OpenAI rejected the API key") from exc
-        except openai.PermissionDeniedError as exc:
-            raise AINotConfigured(f"OpenAI denied access: {exc.message}") from exc
-        except (
-            openai.RateLimitError,
-            openai.APITimeoutError,
-            openai.APIConnectionError,
-            openai.InternalServerError,
-        ) as exc:
-            raise AIRetryable(f"{type(exc).__name__}: {exc}") from exc
-        except openai.APIStatusError as exc:
-            raise AIError(f"OpenAI error {exc.status_code}: {exc.message}") from exc
+        except openai.OpenAIError as exc:
+            raise translate(exc) from exc
 
         usage = usage_from(response, self.model)
         parsed = getattr(response, "output_parsed", None)
@@ -120,3 +135,17 @@ class OpenAIProvider:
             status = getattr(response, "status", None)
             raise AIError(f"No structured output (status {status})", usage)
         return LLMResult(output=parsed, usage=usage, citations=citations_from(response))
+
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        try:
+            response = await self.client.embeddings.create(
+                model=self.embedding_model, input=texts, dimensions=self.embedding_dimensions
+            )
+        except openai.OpenAIError as exc:
+            raise translate(exc) from exc
+        vectors = [d.embedding for d in sorted(response.data, key=lambda d: d.index)]
+        if len(vectors) != len(texts):
+            raise AIError(f"Expected {len(texts)} embeddings, got {len(vectors)}")
+        tokens = getattr(getattr(response, "usage", None), "prompt_tokens", 0) or 0
+        return EmbeddingResult(vectors, Usage(model=getattr(response, "model", None) or self.embedding_model,
+                                              input_tokens=tokens))  # fmt: skip

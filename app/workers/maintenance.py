@@ -10,6 +10,7 @@ from app.db.session import open_session
 from app.domain.principal import TenantContext
 from app.modules.auth.models import RefreshToken
 from app.modules.imports.linking import link_approved_imports
+from app.modules.search.indexing import queue_refresh_if_stale
 from app.modules.users.models import UserToken
 from app.modules.vendors.merge import finish_merges
 
@@ -30,7 +31,9 @@ async def ensure_audit_partitions(session: AsyncSession, months_ahead: int = AUD
     )
 
 
-async def run_maintenance(sessionmaker: async_sessionmaker[AsyncSession]) -> bool:
+async def run_maintenance(
+    sessionmaker: async_sessionmaker[AsyncSession], *, ai_configured: bool = False
+) -> bool:
     """Returns False when another instance is already doing it (advisory lock), so replicas don't collide."""
     async with open_session(sessionmaker, TenantContext.platform()) as s:
         got_lock = await s.scalar(text("SELECT pg_try_advisory_xact_lock(hashtext(:k))"), {"k": _LOCK_KEY})
@@ -49,4 +52,8 @@ async def run_maintenance(sessionmaker: async_sessionmaker[AsyncSession]) -> boo
     # Safety net: imported vendors whose proposal was approved but not linked right away (e.g. a crash).
     await link_approved_imports(sessionmaker)
     await finish_merges(sessionmaker)
+    if ai_configured:  # search vectors for new or changed vendors
+        async with open_session(sessionmaker, TenantContext.platform()) as s:
+            if await queue_refresh_if_stale(s):
+                await s.commit()
     return True

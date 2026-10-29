@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
 
+from app.ai.guards import sanitise
 from app.core.config import Settings
 from app.core.exceptions import ValidationFailed
 from app.crawler.fetcher import Fetcher, FetchResult
@@ -34,6 +35,7 @@ from app.modules.imports.pdf_extract import read_pdf
 
 MAX_TEXT_CHARS = 300_000
 MAX_LINKS = 400
+ATTEMPTS_PER_PAGE = 2  # fetches allowed per wanted page (start pages and the www retry included)
 
 GOOD_WORDS = re.compile(
     r"product|equipment|solution|service|capabilit|portfolio|range|catalog|brochure|datasheet|download|"
@@ -67,6 +69,11 @@ class Page:
     from_cache: bool = False  # served from storage without a request
     error: str | None = None
     pdf_bytes: bytes | None = None
+    suspicious_lines: int = 0  # lines removed because they read like instructions to an AI
+
+    @property
+    def suspicious(self) -> bool:
+        return self.suspicious_lines > 0
 
     @property
     def ok(self) -> bool:
@@ -85,6 +92,19 @@ def link_score(url: str, anchor: str) -> int:
     if LANG_PREFIX.match(path):
         score -= 6  # another language edition of the same content
     return score - path.count("/")
+
+
+def www_variant(url: str) -> str | None:
+    """https://example.com/x -> https://www.example.com/x and back; None for other subdomains."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if host.startswith("www."):
+        other = host[4:]
+    elif host == registrable_domain(url):
+        other = f"www.{host}"
+    else:
+        return None
+    return normalize_url(parts._replace(netloc=other).geturl())
 
 
 def focus_key(term: str) -> str:
@@ -132,15 +152,26 @@ def parse(result: FetchResult, max_pdf_pages: int) -> Page:
                 page.links.append((absolute, anchor))
                 if len(page.links) >= MAX_LINKS:
                     break
+    clean(page)
     page.text = page.text[:MAX_TEXT_CHARS]
     page.sha256 = hashlib.sha256(page.text.encode()).hexdigest() if page.text else None
     return page
 
 
+def clean(page: Page) -> Page:
+    """Strips invisible characters and instruction-like lines from what the AI will read (see app.ai.guards).
+    Idempotent, so it also applies to copies stored before it existed."""
+    text = sanitise(page.text)
+    page.text, page.suspicious_lines = text.text, text.redacted_lines
+    page.title = sanitise(page.title).text
+    page.description = sanitise(page.description).text
+    return page
+
+
 def _from_row(row: WebPage, *, changed: bool, from_cache: bool) -> Page:
-    return Page(row.url, row.final_url, row.status, row.content_type, row.title, row.description, row.language,
+    return clean(Page(row.url, row.final_url, row.status, row.content_type, row.title, row.description, row.language,
                 row.text, [(u, a) for u, a in row.links], row.page_count, row.sha256, row.fetched_at,
-                changed=changed, from_cache=from_cache, error=row.error)  # fmt: skip
+                changed=changed, from_cache=from_cache, error=row.error))  # fmt: skip
 
 
 class Crawler:
@@ -249,13 +280,23 @@ class Crawler:
             heapq.heappush(queue, (-100, order, 0, url))  # start pages always first
             order += 1
         pages: list[Page] = []
-        while queue and len(pages) < max_pages:
+        # Unreadable pages (errors, empty JavaScript shells) don't count towards max_pages, so cap attempts too: one
+        # such site once took 13 minutes walking its whole link list at the polite rate.
+        attempts = 0
+        while queue and len(pages) < max_pages and attempts < max_pages * ATTEMPTS_PER_PAGE:
             _, _, depth, url = heapq.heappop(queue)
+            attempts += 1
             page = await self.page(url)
             if page.final_url != url and (final := normalize_url(page.final_url)):
                 seen.add(final)
             if page.ok:
                 pages.append(page)
+            elif depth == 0 and (other := www_variant(url)) and other not in seen:
+                # Many sites only work on one of example.com / www.example.com (bad certificate, no robots.txt on
+                # the other), and stored websites are often written without "www".
+                seen.add(other)
+                heapq.heappush(queue, (-100, order, 0, other))
+                order += 1
             if depth >= max_depth:
                 continue
             for link, anchor in page.links:

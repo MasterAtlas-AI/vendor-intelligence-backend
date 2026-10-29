@@ -194,7 +194,7 @@ class JobRunner:
 
         while not self._stopping.is_set():
             try:
-                await run_maintenance(self.sessionmaker)
+                await run_maintenance(self.sessionmaker, ai_configured=bool(self.ai and self.ai.configured))
             except Exception:
                 log.exception("maintenance.failed")
             with suppress(TimeoutError):

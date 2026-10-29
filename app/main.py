@@ -21,6 +21,7 @@ from app.modules.discovery.router import router as discovery_router
 from app.modules.imports.router import router as imports_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.proposals.router import router as proposals_router
+from app.modules.search.router import router as search_router
 from app.modules.taxonomy.router import router as taxonomy_router
 from app.modules.tenants.router import router as tenants_router
 from app.modules.users.router import router as users_router
@@ -100,6 +101,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         imports_router,
         ai_router,
         discovery_router,
+        search_router,
     ):
         v1.include_router(router)
     app.include_router(v1)

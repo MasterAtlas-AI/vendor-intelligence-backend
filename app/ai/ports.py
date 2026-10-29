@@ -36,6 +36,12 @@ class LLMResult(Generic[T]):  # noqa: UP046 - shared TypeVar with the Protocol b
     citations: list[Citation] = field(default_factory=list)
 
 
+@dataclass
+class EmbeddingResult:
+    vectors: list[list[float]]  # one per input text, same order
+    usage: Usage
+
+
 class AIError(Exception):
     """A call failed and retrying won't help (bad request, refusal, output that doesn't fit the schema).
 
@@ -67,4 +73,9 @@ class LLMProvider(Protocol):
         web_search: bool = False,
         allowed_domains: list[str] | None = None,
         max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResult[T]: ...
+
+    async def embed(self, texts: list[str]) -> EmbeddingResult:
+        """Vectors for search (embedding_dimensions long, unit length)."""
+        ...

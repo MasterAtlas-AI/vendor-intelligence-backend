@@ -200,6 +200,13 @@ async def test_discovery_end_to_end(
     job = (await client.get(f"{API}/jobs/{job_id}", headers=engineer.headers)).json()
     assert job["status"] == "succeeded", job
     assert job["result"]["candidates"] == 3 and job["result"]["researched"] == 3
+    assert set(job["result"]["stage_started_s"]) >= {
+        "planning",
+        "searching",
+        "researching",
+        "proposing",
+        "done",
+    }
     assert float(job["cost_usd"]) > 0  # every AI call was metered onto the job
 
     results = (await client.get(f"{API}/discovery/runs/{job_id}/results", headers=engineer.headers)).json()

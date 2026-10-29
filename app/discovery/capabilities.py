@@ -23,7 +23,7 @@ from app.discovery import pipeline
 from app.discovery.classify import classify
 from app.discovery.consolidate import Candidate
 from app.discovery.evidence import EvidenceCheck
-from app.discovery.pipeline import Researched, build_row, page_payload, pending_terms
+from app.discovery.pipeline import Researched, build_row, flag_suspicious, page_payload, pending_terms
 from app.discovery.prompts import PROFILE
 from app.discovery.schemas import VendorExtraction
 from app.domain.enums import (
@@ -167,6 +167,7 @@ async def capability_discovery_handler(ctx: JobContext) -> dict[str, Any]:
         [(p.url, p.title, p.text) for p in pages] + [(p.final_url, p.title, p.text) for p in pages]
     )
     row, stats = build_row(researched, tax, codes, check)
+    flag_suspicious(row, pages)
     row.row_number, row.discarded, row.propose_changes = 1, None, True
     row.details["pages"] = [{"url": p.url, "title": p.title} for p in pages[:20]]
     row.details["pages_changed"] = sum(1 for p in pages if p.changed)

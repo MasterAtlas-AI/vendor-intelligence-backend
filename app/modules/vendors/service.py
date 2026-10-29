@@ -56,6 +56,7 @@ class VendorFilters:
     avl_status: AvlStatus | None = None
     mine: bool = False  # only vendors on the caller's own list (any AVL status)
     include_inactive: bool = False
+    vendor_ids: tuple[uuid.UUID, ...] | None = None  # restrict to these (search results)
 
 
 def _like(value: str) -> str:
@@ -140,6 +141,8 @@ class VendorQueryService:
                     ),
                 ]
             stmt = stmt.where(or_(*conditions))
+        if f.vendor_ids is not None:
+            stmt = stmt.where(Vendor.id.in_(f.vendor_ids))
         if f.country:
             country = normalize_country(f.country)
             if country is None:

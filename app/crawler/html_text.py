@@ -30,7 +30,13 @@ VOID = {
 BLOCK = {"p", "div", "section", "article", "main", "li", "ul", "ol", "table", "tr", "td", "th", "br", "dd", "dt",
          "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "figcaption", "caption", "address"}  # fmt: skip
 HEADINGS = {"h1", "h2", "h3", "h4"}
-HIDDEN = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.I)
+# Hidden or visually suppressed text (a classic way to plant instructions for AI readers).
+HIDDEN = re.compile(
+    r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?![.\d])|opacity\s*:\s*0(?![.\d])|"
+    r"(?:left|top|text-indent)\s*:\s*-\d{3,}|clip\s*:\s*rect\(\s*0|(?:height|width)\s*:\s*[01]px",
+    re.I,
+)
+HIDDEN_CLASSES = {"sr-only", "visually-hidden", "screen-reader-text", "hidden", "d-none", "invisible"}
 BOILERPLATE = re.compile(r"cookie|consent|gdpr|newsletter|subscribe|breadcrumb|share-|social", re.I)
 
 
@@ -74,6 +80,7 @@ class _Parser(HTMLParser):
             or "hidden" in a
             or a.get("aria-hidden") == "true"
             or bool(HIDDEN.search(a.get("style", "")))
+            or not HIDDEN_CLASSES.isdisjoint(a.get("class", "").lower().split())
             or bool(BOILERPLATE.search(f"{a.get('id', '')} {a.get('class', '')}"))
         )
         if tag == "head":

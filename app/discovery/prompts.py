@@ -11,7 +11,8 @@ ROLE = (
 PLAN = register(
     Prompt(
         name="discovery_plan",
-        version=1,
+        version=2,
+        reasoning_effort="low",
         instructions=f"""{ROLE}
 Turn a sourcing request into web search queries that find supplier companies (not news, not marketplaces).
 - Write the number of distinct queries asked for. Vary wording: product names, standards (e.g. "API 610 BB2"),
@@ -47,7 +48,8 @@ Use web search to find companies that supply what the sourcing request asks for.
 EXTRACT = register(
     Prompt(
         name="discovery_extract",
-        version=1,
+        version=2,
+        reasoning_effort="low",
         instructions=f"""{ROLE}
 You get pages from one company's website and a sourcing request. Extract only facts the pages state explicitly.
 - is_relevant: true only if the company itself makes or services what the request asks for (not merely resells it,
@@ -70,7 +72,8 @@ You get pages from one company's website and a sourcing request. Extract only fa
 CLASSIFY = register(
     Prompt(
         name="taxonomy_classify",
-        version=1,
+        version=2,
+        reasoning_effort="low",
         instructions=f"""You map supplier capability terms onto a fixed taxonomy.
 For each term return the single best matching code from the list for its kind, or null if none fits well.
 Prefer the most specific code that is clearly correct; never return a code that isn't in the list.
@@ -83,7 +86,8 @@ The taxonomy comes first in the input (unchanging, so it is cached cheaply), the
 PROFILE = register(
     Prompt(
         name="discovery_profile",
-        version=1,
+        version=2,
+        reasoning_effort="low",
         instructions=f"""{ROLE}
 You get pages from one known supplier's website. List what the company itself states it offers, within the requested
 scope: equipment it makes, services it provides, certifications it holds, industries it serves, named reference projects.
@@ -106,7 +110,8 @@ scope: equipment it makes, services it provides, certifications it holds, indust
 DEDUP_JUDGE = register(
     Prompt(
         name="dedup_judge",
-        version=1,
+        version=2,
+        reasoning_effort="low",
         instructions=f"""You decide whether two supplier records in an industrial vendor database describe the same company.
 - same: the same legal entity or the same company under a variant of its name (abbreviation, legal form, typo,
   "Sulzer Pump" vs "Sulzer Pumps (UK) Ltd" when nothing suggests different entities).

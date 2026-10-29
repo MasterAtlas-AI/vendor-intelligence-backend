@@ -185,3 +185,39 @@ async def test_fake_provider_and_build_provider() -> None:
     assert build_provider(settings(openai_api_key=None)) is None
     assert build_provider(settings(openai_api_key=SecretStr("sk-test"), ai_provider="disabled")) is None
     assert isinstance(build_provider(settings(openai_api_key=SecretStr("sk-test"))), OpenAIProvider)
+
+
+async def test_reasoning_effort_only_for_reasoning_models() -> None:
+    stub = StubResponses(_response(Answer(ok=True, echo="hi")))
+    gpt5 = OpenAIProvider(settings(openai_model="gpt-5-mini"), client=SimpleNamespace(responses=stub))
+    await gpt5.structured(instructions="sys", input="user", schema=Answer, reasoning_effort="low")
+    assert stub.kwargs["reasoning"] == {"effort": "low"}
+    provider, stub = _provider(_response(Answer(ok=True, echo="hi")))  # gpt-test: not a reasoning model
+    await provider.structured(instructions="sys", input="user", schema=Answer, reasoning_effort="low")
+    assert "reasoning" not in stub.kwargs
+
+
+async def test_openai_embeddings_keep_order_and_count_tokens() -> None:
+    from app.ai.pricing import embedding_cost
+
+    class StubEmbeddings:
+        async def create(self, **kwargs: Any) -> Any:
+            self.kwargs = kwargs
+            data = [
+                SimpleNamespace(index=1, embedding=[0.0, 1.0]),
+                SimpleNamespace(index=0, embedding=[1.0, 0.0]),
+            ]
+            return SimpleNamespace(
+                data=data, model="text-embedding-3-small", usage=SimpleNamespace(prompt_tokens=500_000)
+            )
+
+    stub = StubEmbeddings()
+    provider = OpenAIProvider(settings(), client=SimpleNamespace(embeddings=stub))
+    result = await provider.embed(["first", "second"])
+    assert result.vectors == [[1.0, 0.0], [0.0, 1.0]]  # sorted back into input order
+    assert stub.kwargs == {
+        "model": "text-embedding-3-small",
+        "input": ["first", "second"],
+        "dimensions": 1536,
+    }
+    assert str(embedding_cost(result.usage, settings())) == "0.010000"  # 0.5M tokens at $0.02/M

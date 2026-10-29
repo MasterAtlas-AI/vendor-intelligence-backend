@@ -7,7 +7,9 @@ as instructions.
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+Effort = Literal["minimal", "low", "medium", "high"]
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,9 @@ class Prompt:
     version: int
     instructions: str  # the system/developer message: trusted, written by us
     template: str  # the user message, with {placeholders} for inputs
+    # How hard a reasoning model thinks. None = the model's default ("medium" for gpt-5 models). "low" suits reading
+    # pages we already fetched: much faster and cheaper, with the evidence check catching mistakes.
+    reasoning_effort: Effort | None = None
 
     @property
     def key(self) -> str:

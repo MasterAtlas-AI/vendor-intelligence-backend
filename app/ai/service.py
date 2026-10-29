@@ -20,8 +20,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.ai.models import AiUsageEvent
-from app.ai.ports import AIError, AINotConfigured, AIRetryable, LLMProvider, LLMResult, Usage
-from app.ai.pricing import call_cost
+from app.ai.ports import AIError, AINotConfigured, AIRetryable, EmbeddingResult, LLMProvider, LLMResult, Usage
+from app.ai.pricing import call_cost, embedding_cost
 from app.ai.prompts import Prompt
 from app.core.config import Settings
 from app.core.exceptions import AppError, problem_response
@@ -89,6 +89,10 @@ async def with_retries(
                 on_retry(attempt, exc)
             await sleep(min(2 ** (attempt - 1), 30) * (1 + random.random() / 4))  # noqa: S311 - jitter
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+EMBED_BATCH = 128  # texts per embeddings request
+EMBED_MAX_CHARS = 8_000  # ~2k tokens; the model accepts 8k, but long chunks dilute the vector
 
 
 class AiService:
@@ -167,6 +171,7 @@ class AiService:
                 web_search=web_search,
                 allowed_domains=allowed_domains,
                 max_output_tokens=max_output_tokens,
+                reasoning_effort=prompt.reasoning_effort,
             )
 
         try:
@@ -182,8 +187,44 @@ class AiService:
         await self.record(prompt, result.usage, ctx)
         return result
 
-    async def record(self, prompt: Prompt, usage: Usage, ctx: CallContext, outcome: str = "ok") -> Decimal:
-        cost = call_cost(usage, self.settings)
+    async def embed(self, texts: list[str], ctx: CallContext, purpose: str = "search") -> list[list[float]]:
+        """Embeds texts in batches, metering each batch as one call named `embed:<purpose>`."""
+        provider = self.provider
+        if provider is None:
+            raise AINotAvailable("AI is not configured on this server (set OPENAI_API_KEY)")
+        vectors: list[list[float]] = []
+        for i in range(0, len(texts), EMBED_BATCH):
+            batch = [t[:EMBED_MAX_CHARS] for t in texts[i : i + EMBED_BATCH]]
+            await self.ensure_budget(ctx)
+
+            def retrying(attempt: int, exc: AIRetryable) -> None:
+                log.warning("ai.retry", prompt=f"embed:{purpose}", attempt=attempt, error=str(exc)[:200])
+
+            async def call(batch: list[str] = batch) -> EmbeddingResult:
+                return await provider.embed(batch)
+
+            try:
+                result: EmbeddingResult = await with_retries(
+                    call, attempts=self.settings.ai_max_retries, sleep=self._sleep, on_retry=retrying
+                )
+            except AINotConfigured as exc:
+                raise AINotAvailable(str(exc)) from exc
+            await self.record(
+                f"embed:{purpose}", result.usage, ctx, cost=embedding_cost(result.usage, self.settings)
+            )
+            vectors += result.vectors
+        return vectors
+
+    async def record(
+        self,
+        prompt: Prompt | str,
+        usage: Usage,
+        ctx: CallContext,
+        outcome: str = "ok",
+        cost: Decimal | None = None,
+    ) -> Decimal:
+        key = prompt if isinstance(prompt, str) else prompt.key
+        cost = call_cost(usage, self.settings) if cost is None else cost
         session_ctx = TenantContext(ctx.tenant_id) if ctx.tenant_id else TenantContext.platform()
         async with open_session(self.sessionmaker, session_ctx, ctx.user_id) as s:
             s.add(
@@ -191,7 +232,7 @@ class AiService:
                     tenant_id=ctx.tenant_id,
                     user_id=ctx.user_id,
                     job_id=ctx.job_id,
-                    prompt=prompt.key,
+                    prompt=key,
                     provider=getattr(self.provider, "name", "unknown"),
                     model=usage.model,
                     input_tokens=usage.input_tokens,
@@ -208,7 +249,7 @@ class AiService:
             await s.commit()
         log.info(
             "ai.call",
-            prompt=prompt.key,
+            prompt=key,
             model=usage.model,
             cost_usd=str(cost),
             outcome=outcome,

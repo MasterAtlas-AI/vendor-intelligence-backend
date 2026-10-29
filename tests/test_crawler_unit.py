@@ -248,3 +248,29 @@ async def test_crawl_site_visits_best_pages_within_budget() -> None:
         and "BB5" in brochure.text
     )
     assert all(p.sha256 and p.changed for p in pages)
+
+
+def test_www_variant() -> None:
+    from app.crawler.crawler import www_variant
+
+    assert www_variant("https://kelvion.com/") == "https://www.kelvion.com/"
+    assert www_variant("https://www.kelvion.com/en/") == "https://kelvion.com/en/"
+    assert www_variant("https://shop.kelvion.com/") is None
+
+
+async def test_crawl_site_stops_on_a_site_of_unreadable_pages() -> None:
+    links = "".join(f"<a href='/products/p{i}/'>Product {i}</a>" for i in range(100))
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        requested.append(request.url.path)
+        if request.url.path == "/":
+            return html(f"<nav>{links}</nav><p>Home</p>")
+        return html("<script>render()</script>")  # an empty JavaScript shell: no text
+
+    pages = await Crawler(fetcher(handler), settings()).crawl_site(
+        ["https://fjordpumps-maitest.com/"], max_pages=5
+    )
+    assert len(pages) == 1 and len(requested) == 10  # 5 wanted pages x 2 attempts, not all 101 links
