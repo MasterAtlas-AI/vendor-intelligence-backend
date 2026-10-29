@@ -130,8 +130,8 @@ async def _start_capability_job(
     vendor = await session.get(Vendor, vendor_id)
     if vendor is None or vendor.status == VendorStatus.RETIRED:
         raise NotFound("Vendor not found")
-    if not (vendor.website or vendor.domains):
-        raise ValidationFailed("This vendor has no website to research; add one first")
+    if not (vendor.website or vendor.domains or body.website):
+        raise ValidationFailed("This vendor has no website to research; give one (website) or add it first")
     job_type, scope = CAPABILITY_JOBS[kind]
     est = capability_estimate(body.max_pages, c.settings)
     await c.ai.ensure_budget(CallContext(principal.tenant_id), Decimal(str(est.typical_cost_usd)))

@@ -75,7 +75,7 @@ _TOKEN = re.compile(r"[a-z]+|\d+")
 def tokens(text: str) -> list[tuple[str, int]]:
     """Lower-cased word tokens with their character offsets. Short prefixes are glued to a following number
     ("BB-2", "BB 2", "bb2" -> "bb2"; "ISO 9001" -> "iso9001"), and plurals are folded ("pumps" -> "pump"), so
-    labels and text compare the same way regardless of spacing."""
+    labels and text compare the same way regardless of spacing. "and" is dropped, so it matches "&"."""
     raw = [(m.group(), m.start(), m.end()) for m in _TOKEN.finditer(text.lower())]
     out: list[tuple[str, int]] = []
     i = 0
@@ -87,6 +87,9 @@ def tokens(text: str) -> list[tuple[str, int]]:
                 out.append((tok + nxt, start))
                 i += 2
                 continue
+        if tok == "and":  # "shell and tube" = "Shell & tube" ("&" is never a token)
+            i += 1
+            continue
         if tok.isalpha() and len(tok) > 3 and tok.endswith("s"):
             tok = tok[:-1]
         out.append((tok, start))

@@ -25,17 +25,20 @@ from typing import Any
 from sqlalchemy import Select, and_, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.service import AiService, CallContext
+from app.ai.ports import AIError
+from app.ai.service import AiService, BudgetExceeded, CallContext
 from app.core.exceptions import NotFound
+from app.core.logging import get_logger
 from app.domain.enums import FactStatus, VendorStatus
 from app.domain.principal import Principal
 from app.modules.imports.importer import Taxonomy
+from app.modules.search.intent import RERANK, parse_ai, parse_local
 from app.modules.search.intent import clean as clean_intent
-from app.modules.search.intent import parse_ai, parse_local
 from app.modules.search.models import SearchHistory, VendorEmbedding
 from app.modules.search.schemas import (
     MatchReason,
     ParseResult,
+    Rerank,
     ScoreBreakdown,
     SearchFilters,
     SearchHit,
@@ -47,6 +50,7 @@ from app.modules.search.schemas import (
 )
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
 from app.modules.tenant_vendors.models import TenantVendorLink
+from app.modules.tenants.models import Tenant
 from app.modules.vendors.models import (
     FactSource,
     Vendor,
@@ -72,8 +76,10 @@ CANDIDATES = 150
 SEMANTIC_CHUNKS = 200
 PARSE_CACHE_DAYS = 30
 TAXONOMY_TTL_SECONDS = 1800
+RERANK_TOP = 20
 MIN_CONFIDENCE = 0.10  # weaker matches are noise (e.g. a valve maker for a pump query)
 
+log = get_logger(__name__)
 _taxonomy: tuple[float, Taxonomy] | None = None
 
 
@@ -210,7 +216,11 @@ class SearchService:
             return None
         if await self.s.scalar(select(VendorEmbedding.id).limit(1)) is None:
             return None
-        [vector] = await self.ai.embed([text], self._call, purpose="search_query")
+        try:
+            [vector] = await self.ai.embed([text], self._call, purpose="search_query")
+        except (AIError, BudgetExceeded) as exc:  # out of budget or provider down: search on without vectors
+            log.warning("search.semantic_unavailable", error=str(exc)[:200])
+            return None
         distance = VendorEmbedding.embedding.cosine_distance(vector)
         nearest = (
             select(VendorEmbedding.vendor_id, VendorEmbedding.content, distance.label("d"))
@@ -411,10 +421,58 @@ class SearchService:
             for conf, _, v, scores, matched in top
             if v.id in summaries
         ]
+        reranked = False
+        if len(hits) > 1 and await self._rerank_wanted(req):
+            reranked = await self._rerank(req.query.strip() or self._describe(intent, tax), hits, facts)
+            if reranked:
+                hits.sort(key=lambda h: -(h.ai_fit or 0))  # stable: equal fits keep the hybrid order
         took = int((time.monotonic() - started) * 1000)
         search_id = await self._log(req, intent, parser, filters, hits, took)
         return SearchResponse(search_id=search_id, intent=intent, parser=parser, semantic=sem is not None,
-                              took_ms=took, results=hits)  # fmt: skip
+                              reranked=reranked, took_ms=took, results=hits)  # fmt: skip
+
+    async def _rerank_wanted(self, req: SearchRequest) -> bool:
+        if not self.ai.configured:
+            return False
+        if req.rerank is not None:
+            return req.rerank
+        if self.principal.tenant_id is None:
+            return False
+        settings = (
+            await self.s.scalar(select(Tenant.settings).where(Tenant.id == self.principal.tenant_id)) or {}
+        )
+        return bool(settings.get("search_rerank"))
+
+    async def _rerank(self, query: str, hits: list[SearchHit], facts: dict[uuid.UUID, Facts]) -> bool:
+        """One AI call scores the top results' technical fit (0-10) with a reason. False (order unchanged) when
+        the budget is used up or the call fails: re-ranking is a refinement, never a reason for search to fail."""
+        top = hits[:RERANK_TOP]
+        refs = {f"R{i}": h for i, h in enumerate(top, start=1)}
+        records = []
+        for ref, h in refs.items():
+            f = facts.get(h.vendor.id, Facts())
+            records.append({
+                "ref": ref, "name": h.vendor.display_name, "country": h.vendor.hq_country,
+                "equipment": [e[3] + (f" ({', '.join(e[4])})" if e[4] else "") for e in f.equipment][:15],
+                "services": [sv[2] for sv in f.services][:10],
+                "certifications": [n for _, n in f.certifications][:10],
+                "industries": [n for _, n in f.industries],
+            })  # fmt: skip
+        try:
+            result = await self.ai.run(RERANK, Rerank, self._call, query=query, records=records)
+        except (AIError, BudgetExceeded) as exc:
+            log.warning("search.rerank_failed", error=str(exc)[:200])
+            return False
+        seen = False
+        for item in result.output.ranking:
+            hit = refs.get(item.ref.strip())
+            if hit is None or hit.ai_fit is not None:
+                continue
+            hit.ai_fit = round(max(0.0, min(10.0, item.fit)), 1)
+            if item.reason.strip():
+                hit.reasons.insert(0, MatchReason(kind="ai", label=item.reason.strip()[:200]))
+            seen = True
+        return seen
 
     @staticmethod
     def _describe(intent: SearchIntent, tax: Taxonomy) -> str:

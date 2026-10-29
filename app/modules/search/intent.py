@@ -113,3 +113,18 @@ def clean(intent: SearchIntent, tax: Taxonomy) -> SearchIntent:
 async def parse_ai(query: str, tax: Taxonomy, ai: AiService, call: CallContext) -> SearchIntent:
     result = await ai.run(PARSE, SearchIntent, call, taxonomy=taxonomy_text(tax), query=query)
     return clean(result.output, tax)
+
+
+RERANK = register(
+    Prompt(
+        name="search_rerank",
+        version=1,
+        reasoning_effort="low",
+        instructions=f"""You are a procurement engineer judging vendor search results for industrial equipment and
+services. For each vendor record, rate how well it fits the query technically (0 = unrelated, 10 = exact fit),
+using only what the record says, and give a one-line reason a buyer would find useful (max 20 words).
+Return every ref exactly once.
+{DATA_RULE}""",
+        template="Query:\n{query}\n\nVendor records:\n{records}",
+    )
+)

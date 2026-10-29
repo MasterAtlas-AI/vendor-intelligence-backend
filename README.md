@@ -26,7 +26,7 @@ Design documents: [`../docs`](../docs/README.md)
 
 ## Status
 
-**Phase 1 (Foundation): done.** **Phase 2 (Vendor management): done.** All 5 slices are done: the knowledge base schema, taxonomy and vendor read APIs; proposals and curator approvals; the Excel import; the PDF import; and the vendor, import and approval screens in the frontend repo.
+**Phase 1 (Foundation): done.** **Phase 2 (Vendor management): done.** **Phase 3 (AI discovery): done.** **Phase 4 (AI intelligence): done in code**; its search-latency target can only be measured once deployed next to the database.
 
 ### Phase 1
 
@@ -53,6 +53,27 @@ Design documents: [`../docs`](../docs/README.md)
 | Excel import | Upload a vendor list (`.xlsx` or `.csv`, up to 10 MB / 5,000 rows; the file is stored in Postgres). The API detects the header row (even below a title), suggests a column mapping from the header names, and previews the first 20 rows with the predicted outcome of each. The import runs as a background job with live progress, in one transaction, so a crash or cancel leaves nothing half-done. For each row it matches the global knowledge base by website domain, then by exact company name or alias. A match joins the organization's own vendor list with the row's AVL status, vendor code, tags and notes; facts the knowledge base lacks (equipment, services, certifications, industries, aliases, missing country/city/description) are proposed for review. An unknown vendor becomes a new-vendor proposal, and joins the organization's list the moment a curator approves it. Trusted tenants' and curators' imports are approved automatically. Duplicates within the file, names that match several vendors, and vendors already awaiting review are detected. The report lists every row's outcome and reasons (`/imports/{job_id}/rows`, or as CSV). |
 | PDF import | Upload a vendor's brochure, datasheet, certificate or prequalification pack (`.pdf`, up to 300 pages read). Rule-based for now (AI extraction arrives in Phase 3): the text layer is matched against the taxonomy's names and synonyms, so it finds equipment types (e.g. API 610 BB2/BB5/VS1), services, certifications (with certificate number and expiry when stated next to them) and industries. Each candidate comes with its page, a text snippet and a confidence. The upload also suggests the company name and website found in the document; scanned PDFs without text are flagged (no OCR yet). You say whose document it is (an existing vendor, or a new one by name and website), untick candidates you don't want, and a background job proposes the rest through the same matching, review and auto-approval rules as the Excel import, with the page and snippet as evidence. |
 | Normalisation | Company-name keys that drop legal forms ("Flowserve Corp." = "Flowserve"), registrable web domains from the bundled public-suffix list, and country names to ISO codes. These are the basis for duplicate detection in the Excel import. |
+
+### Phase 3 (AI discovery)
+
+| Area | What's in place |
+|---|---|
+| AI layer | OpenAI through a provider port (a scripted fake for tests), Structured Outputs only, versioned prompts with untrusted text fenced as data, per-prompt reasoning effort, retries, and every call metered into `ai_usage_events`. Monthly budget per organization (`tenants.quotas.ai_monthly_usd`, default US$25) and for platform staff. |
+| Crawler | robots.txt, one request per site per second, SSRF checks on every redirect, size/type limits, conditional requests and a `web_pages` cache. Best-first crawl toward product pages, `www.` retry, capped attempts. Page text is sanitised (hidden text, invisible characters and instruction-like lines removed) before the AI reads it. |
+| Vendor discovery | Brief or categories -> web search -> candidate consolidation -> match against the knowledge base (AI judge for near-duplicates) -> crawl -> extraction -> evidence check (every fact must quote text from a fetched page) -> classification -> proposals for curator review. Never auto-approved. |
+| Vendor research | Re-read one known vendor's website for equipment/certifications, services or everything; new facts are proposed, known facts gain evidence, conflicts are flagged. |
+| Duplicates | Fuzzy matching in imports; a scan job that raises merge proposals (AI judges the grey zone); approving a merge moves facts, evidence and each organization's own records. |
+| Accuracy | `tests/accuracy` (opt-in with `RUN_REAL_AI=1`): 30-vendor golden set; measured fact precision 100% (62/62). Prompt-injection test site. |
+
+### Phase 4 (AI intelligence)
+
+| Area | What's in place |
+|---|---|
+| Search vectors | `vendor_embeddings` (text-embedding-3-small, 1536 dims, HNSW): a profile chunk per vendor plus one per equipment/service fact, refreshed after approvals and by the maintenance loop (only changed chunks are re-embedded). |
+| Hybrid search | `POST /search`: local (free) or AI query understanding into editable intent chips; structured + full-text + vector retrieval fused with RRF; a confidence score per vendor with its breakdown and the facts (and sources) behind the match; hard filters (country, AVL status, my vendors); search history (RLS) and suggestions. Optional AI re-ranking of the top 20 by technical fit (`tenants.settings.search_rerank`), falling back to the normal order if the budget runs out. Search keeps working without AI. Relevance on a 50-query fixed catalogue: `tests/test_search_relevance.py` (nDCG@10). |
+| Projects & scorecards | Projects with members (owner/editor/viewer), vendors by stage (longlist -> shortlist -> selected) ranked by scorecard, scorecard templates (weighted criteria) and scorecards (0-10 per criterion, weighted 0-100 total, finalise/reopen). Tenant-private (RLS). |
+| Assistant | `POST /assistant/chat`: plan -> knowledge-base look-up -> answer from those records only, every vendor cited ([V1]); citations outside the records are removed. Two AI calls per message. The conversation is kept by the client. |
+| Data quality | A 0-1 score per vendor (website, country, description, facts, certifications, evidence coverage, freshness) recomputed by the maintenance loop, a curator dashboard of issues (`/admin/data-quality`), and a capped AI re-check of the stalest vendors. |
 
 ---
 

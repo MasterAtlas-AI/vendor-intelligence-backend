@@ -10,6 +10,7 @@ from app.db.session import open_session
 from app.domain.principal import TenantContext
 from app.modules.auth.models import RefreshToken
 from app.modules.imports.linking import link_approved_imports
+from app.modules.quality.service import rescore
 from app.modules.search.indexing import queue_refresh_if_stale
 from app.modules.users.models import UserToken
 from app.modules.vendors.merge import finish_merges
@@ -52,6 +53,10 @@ async def run_maintenance(
     # Safety net: imported vendors whose proposal was approved but not linked right away (e.g. a crash).
     await link_approved_imports(sessionmaker)
     await finish_merges(sessionmaker)
+    async with open_session(sessionmaker, TenantContext.platform()) as s:
+        rescored = await rescore(s)  # data-quality scores (cheap, one statement)
+        await s.commit()
+    log.info("maintenance.quality_rescored", vendors=rescored)
     if ai_configured:  # search vectors for new or changed vendors
         async with open_session(sessionmaker, TenantContext.platform()) as s:
             if await queue_refresh_if_stale(s):

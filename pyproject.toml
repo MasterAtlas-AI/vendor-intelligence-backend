@@ -53,6 +53,7 @@ ignore = ["S101", "B008", "RUF012", "E501", "N818"]  # line length is owned by r
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106"]
 "migrations/**" = ["E501", "S608"]  # DDL built from constants and validated role names
+"app/modules/quality/service.py" = ["S608"]  # SQL assembled from module constants; all values are bound parameters
 
 [tool.mypy]
 python_version = "3.12"

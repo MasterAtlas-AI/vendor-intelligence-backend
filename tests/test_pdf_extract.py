@@ -30,9 +30,15 @@ def index() -> PhraseIndex:
 
 def test_tokens_glue_designations_and_fold_plurals() -> None:
     assert [t for t, _ in tokens("BB-2, BB 2 and bb2 Pumps; ISO_9001")] == [
-        "bb2", "bb2", "and", "bb2", "pump", "iso9001",
+        "bb2", "bb2", "bb2", "pump", "iso9001",
     ]  # fmt: skip
     assert tokens("Valves")[0] == ("valve", 0)
+    # "and" is dropped so it matches "&" in taxonomy names.
+    assert (
+        [t for t, _ in tokens("shell and tube")]
+        == [t for t, _ in tokens("Shell & tube")]
+        == ["shell", "tube"]
+    )
 
 
 def test_extracts_facts_with_evidence(index: PhraseIndex) -> None:

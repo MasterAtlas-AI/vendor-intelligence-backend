@@ -1,6 +1,7 @@
 """Hybrid search end to end: local query understanding, structured + full-text + vector retrieval, confidence scores
 with the facts (and sources) behind each match, hard filters, the tenant's own AVL status, history and suggestions."""
 
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -147,3 +148,66 @@ async def test_search_without_vectors_still_works(
     body = resp.json()
     assert resp.status_code == 200 and body["semantic"] is False
     assert body["results"][0]["vendor"]["id"] == str(vid) and body["results"][0]["scores"]["semantic"] is None
+
+
+async def test_ai_rerank_and_budget_fallback(
+    client: AsyncClient, factory: Factory, container: Container
+) -> None:
+    from sqlalchemy import update
+
+    from app.modules.search.schemas import Rerank
+    from app.modules.tenants.models import Tenant
+
+    tag = uuid.uuid4().hex[:6]
+    first = await _vendor(
+        container, f"Rerank Pumps One {tag}", "NO", [_eq("pumps.centrifugal.api610.bb2", "BB2 A")]
+    )
+    second = await _vendor(
+        container, f"Rerank Pumps Two {tag}", "NO", [_eq("pumps.centrifugal.api610.bb2", "BB2 B")]
+    )
+
+    def judge(text: str) -> dict[str, Any]:
+        # Prefer "Two" whatever position it came in.
+        records = json.loads(text.split("Vendor records:\n<<<DATA\n", 1)[1].split("\nDATA>>>", 1)[0])
+        ranking = [
+            {"ref": r["ref"], "fit": 9 if "Two" in r["name"] else 3,
+             "reason": "Exact BB2 maker" if "Two" in r["name"] else ""}
+            for r in records
+        ]  # fmt: skip
+        return {"ranking": ranking}
+
+    fake = FakeProvider().on(Rerank, judge)
+    previous, container.ai.provider = container.ai.provider, fake
+    try:
+        tenant = await factory.tenant()
+        engineer = await factory.user(tenant, ["engineer"])
+        query = {"query": f"BB2 pumps {tag}", "limit": 5}
+        plain = (await client.post(f"{API}/search", json=query, headers=engineer.headers)).json()
+        assert plain["reranked"] is False and all(h["ai_fit"] is None for h in plain["results"])
+
+        async with open_session(container.sessionmaker, TenantContext.platform()) as s:
+            await s.execute(
+                update(Tenant).where(Tenant.id == tenant).values(settings={"search_rerank": True})
+            )
+            await s.commit()
+        ranked = (await client.post(f"{API}/search", json=query, headers=engineer.headers)).json()
+        assert ranked["reranked"] is True
+        ids = [h["vendor"]["id"] for h in ranked["results"]]
+        assert ids.index(str(second)) < ids.index(str(first))
+        top = ranked["results"][0]
+        assert top["ai_fit"] == 9 and top["reasons"][0] == {"kind": "ai", "label": "Exact BB2 maker", "code": None,
+                                                             "sources": []}  # fmt: skip
+
+        # Out of AI budget: search still answers, without vectors or re-ranking.
+        async with open_session(container.sessionmaker, TenantContext.platform()) as s:
+            await s.execute(update(Tenant).where(Tenant.id == tenant).values(quotas={"ai_monthly_usd": 0}))
+            await s.commit()
+        broke = await client.post(f"{API}/search", json=query, headers=engineer.headers)
+        assert (
+            broke.status_code == 200
+            and broke.json()["reranked"] is False
+            and broke.json()["semantic"] is False
+        )
+        assert len(broke.json()["results"]) >= 2
+    finally:
+        container.ai.provider = previous

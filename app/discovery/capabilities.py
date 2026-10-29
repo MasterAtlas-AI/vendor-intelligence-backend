@@ -10,9 +10,10 @@ compared with what the knowledge base holds:
 """
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from app.ai.ports import AIError
@@ -33,7 +34,7 @@ from app.domain.enums import (
     ProposalOrigin,
     VendorStatus,
 )
-from app.domain.normalization import normalize_name, registrable_domain
+from app.domain.normalization import normalize_name, normalize_website, registrable_domain
 from app.modules.audit.service import record_audit
 from app.modules.imports.importer import ImportOptions, ParsedRow, Taxonomy, VendorListImporter, _fact_key
 from app.modules.proposals.applier import Applier
@@ -55,6 +56,19 @@ class CapabilityRequest(BaseModel):
     max_pages: int = Field(default=12, ge=3, le=30)
     # Extra pages to read (e.g. a product catalogue the crawler might not reach); must be on the vendor's own sites.
     extra_urls: list[str] = Field(default_factory=list, max_length=5)
+    # A website to research when the vendor has none on record (e.g. given in the assistant). Proposed as the
+    # vendor's website for curator review along with what is found.
+    website: str | None = Field(default=None, max_length=500)
+
+    @field_validator("website")
+    @classmethod
+    def _website(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        url = normalize_website(v)
+        if url is None or registrable_domain(url) is None:
+            raise ValueError("not a usable web address")
+        return url
 
 
 def scoped(extraction: VendorExtraction, scope: list[str]) -> VendorExtraction:
@@ -134,6 +148,8 @@ async def capability_discovery_handler(ctx: JobContext) -> dict[str, Any]:
         tax = await Taxonomy.load(s)
         name, website, country = vendor.display_name, vendor.website, vendor.hq_country
         domains = [d.domain for d in vendor.domains]
+    if not (website or domains) and req.website:
+        website = req.website  # proposed as the vendor's website (ADD_DOMAIN) together with the findings
     primary = registrable_domain(website) if website else (domains[0] if domains else None)
     if primary is None:
         raise AIError("This vendor has no website or domain to research")
@@ -197,6 +213,7 @@ async def capability_discovery_handler(ctx: JobContext) -> dict[str, Any]:
             "counts": {outcome.outcome.value: 1},
             "outcome": outcome.outcome.value,
         }
+        vendor.last_verified_at = datetime.now(UTC)  # its website was just re-read (data-quality freshness)
         record_audit(s, "discovery.vendor_researched", actor_type=ActorType.USER if ctx.user_id else ActorType.SYSTEM,
                      actor_id=ctx.user_id, tenant_id=ctx.tenant_id, entity_type="vendor", entity_id=vendor_id,
                      changes=summary)  # fmt: skip

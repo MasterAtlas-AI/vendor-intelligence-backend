@@ -44,6 +44,8 @@ class SearchRequest(BaseModel):
     parser: Literal["local", "ai"] = "local"  # local: instant and free; ai: better with free-form wording
     filters: SearchFilters = Field(default_factory=SearchFilters)
     limit: int = Field(default=20, ge=1, le=50)
+    # AI re-ranking of the top results by technical fit. None: the organization's setting (settings.search_rerank).
+    rerank: bool | None = None
 
 
 class ParseRequest(BaseModel):
@@ -67,7 +69,7 @@ class SourceRef(BaseModel):
 class MatchReason(BaseModel):
     """One reason a vendor matched, with the knowledge-base fact and where it came from."""
 
-    kind: Literal["equipment", "service", "certification", "industry", "standard", "text", "semantic"]
+    kind: Literal["equipment", "service", "certification", "industry", "standard", "text", "semantic", "ai"]
     label: str  # "API 610 BB2 pump: HX-2"
     code: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
@@ -88,6 +90,7 @@ class SearchHit(BaseModel):
     confidence: float  # 0..1
     scores: ScoreBreakdown
     reasons: list[MatchReason]
+    ai_fit: float | None = None  # 0-10 technical fit from AI re-ranking, when it ran
 
 
 class SearchResponse(BaseModel):
@@ -95,6 +98,7 @@ class SearchResponse(BaseModel):
     intent: SearchIntent
     parser: Literal["local", "ai"]
     semantic: bool  # vector similarity was used (AI configured and the index has vectors)
+    reranked: bool = False  # the AI re-ordered the top results by technical fit
     took_ms: int
     results: list[SearchHit]
 
@@ -108,6 +112,18 @@ class SearchHistoryRead(BaseModel):
     result_count: int
     took_ms: int
     created_at: datetime
+
+
+class RerankItem(BaseModel):
+    ref: str
+    fit: float  # 0-10
+    reason: str
+
+
+class Rerank(BaseModel):
+    """AI output for re-ranking (flat, unconstrained for strict Structured Outputs)."""
+
+    ranking: list[RerankItem]
 
 
 class Suggestion(BaseModel):

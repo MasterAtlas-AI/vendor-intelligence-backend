@@ -216,7 +216,11 @@ EQUIPMENT: tuple[Node, ...] = (
         "packages",
         "Process packages & skids",
         n("gas_compression", "Gas compression packages"),
-        n("water_injection", "Water injection & treatment packages", syn=("sulphate removal", "SRU")),
+        n(
+            "water_injection",
+            "Water injection & treatment packages",
+            syn=("sulphate removal", "SRU", "water injection package", "WI package"),
+        ),
         n("chemical_injection", "Chemical injection packages"),
         n("gas_dehydration", "Gas dehydration packages", syn=("TEG unit", "glycol dehydration")),
         n("produced_water", "Produced water treatment", syn=("hydrocyclone", "IGF")),
