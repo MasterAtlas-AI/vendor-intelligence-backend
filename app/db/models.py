@@ -10,6 +10,7 @@ from app.modules.imports.models import ImportRow, Upload
 from app.modules.jobs.models import Job
 from app.modules.projects.models import Project, ProjectMember, ProjectVendor, Scorecard, ScorecardTemplate
 from app.modules.proposals.models import ApprovalHistory, KnowledgeProposal, ProposalItem
+from app.modules.reports.models import Report
 from app.modules.rfqs.models import Rfq, RfqVendor
 from app.modules.search.models import SearchHistory, VendorEmbedding
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
@@ -49,6 +50,7 @@ __all__ = [
     "ProjectVendor",
     "ProposalItem",
     "RefreshToken",
+    "Report",
     "Rfq",
     "RfqVendor",
     "Role",

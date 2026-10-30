@@ -9,6 +9,7 @@ from app.discovery.capabilities import capability_discovery_handler
 from app.discovery.pipeline import vendor_discovery_handler
 from app.domain.enums import JobType
 from app.modules.imports.job import excel_import_handler, pdf_import_handler
+from app.modules.reports.service import report_handler
 from app.modules.search.indexing import embedding_handler
 from app.modules.vendors.dedup import dedup_scan_handler
 from app.workers.runner import Handler, JobContext
@@ -39,4 +40,5 @@ HANDLERS: dict[str, Handler] = {
     JobType.ENRICHMENT: capability_discovery_handler,
     JobType.DEDUP_SCAN: dedup_scan_handler,
     JobType.EMBEDDING: embedding_handler,
+    JobType.REPORT: report_handler,
 }
