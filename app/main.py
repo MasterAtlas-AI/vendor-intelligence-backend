@@ -14,6 +14,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.db.schema_check import schema_mismatch
 from app.modules.ai.router import router as ai_router
+from app.modules.analytics.router import router as analytics_router
 from app.modules.api_keys.router import router as api_keys_router
 from app.modules.assistant.router import router as assistant_router
 from app.modules.audit.router import router as audit_router
@@ -112,6 +113,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         quality_router,
         rfqs_router,
         reports_router,
+        analytics_router,
     ):
         v1.include_router(router)
     app.include_router(v1)
