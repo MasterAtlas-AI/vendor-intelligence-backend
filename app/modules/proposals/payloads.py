@@ -5,6 +5,7 @@ when a curator edits it, so the applier only ever sees well-formed data. Taxonom
 (stable, human-readable) and are resolved to ids at apply time.
 """
 
+import re
 import uuid
 from datetime import date
 from typing import Annotated, Any, Literal
@@ -68,6 +69,9 @@ VendorField = Literal["legal_name", "display_name", "website", "hq_country", "hq
 class UpdateVendorField(_Payload):
     field: VendorField
     value: str | None = Field(default=None, max_length=5000)
+    # Website only: a group company using its parent's site. The website is saved but its domain is not claimed
+    # (the domain stays with the vendor that owns it, so duplicate detection is unaffected).
+    shared_domain: bool = False
 
     @model_validator(mode="after")
     def _normalise(self) -> "UpdateVendorField":
@@ -98,6 +102,63 @@ class AddDomain(_Payload):
 class AddAlias(_Payload):
     alias: Str300
     alias_type: Literal["trade", "former", "subsidiary", "abbrev"] = "trade"
+
+
+CONTACT_TYPES = ("general", "sales", "service", "support", "procurement", "other")
+# Mailbox names that are roles, not people (anything else that looks like "first.last" is refused).
+ROLE_MAILBOXES = (
+    "info", "sales", "service", "services", "support", "contact", "enquir", "inquir", "office", "admin", "hello",
+    "mail", "marketing", "export", "parts", "spares", "aftersales", "procurement", "purchas", "tender", "bid",
+    "quote", "rfq", "orders", "customer", "help", "general", "reception", "projects", "engineering", "technical",
+)  # fmt: skip
+
+
+def company_mailbox(email: str) -> bool:
+    """True for role mailboxes (sales@, info.sg@, enquiries@); False for ones that look like a person's name."""
+    local = email.split("@", 1)[0].lower()
+    if any(role in local for role in ROLE_MAILBOXES):
+        return True
+    parts = [p for p in re.split(r"[._\-]", local) if p]
+    # "john.smith", "j.smith", "jsmith2": treat as personal. Single short codes like "sgp" or "kl" are offices.
+    return (len(parts) == 1 and not parts[0].isalpha()) or (len(parts) == 1 and len(parts[0]) <= 4)
+
+
+class AddContact(_Payload):
+    contact_type: Literal["general", "sales", "service", "support", "procurement", "other"] = "general"
+    label: str = Field(default="", max_length=120)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=40)
+    country: str | None = None
+
+    _country = field_validator("country")(_country)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        v = v.strip().lower()
+        if not re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", v):
+            raise ValueError(f"not an email address: {v!r}")
+        if not company_mailbox(v):
+            raise ValueError("only company mailboxes (sales@, info@...) are kept, not a person's address")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        v = re.sub(r"[^\d+()\- ]", "", v).strip()
+        if not 6 <= len(re.sub(r"\D", "", v)) <= 16:
+            raise ValueError(f"not a phone number: {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _something(self) -> "AddContact":
+        if not (self.email or self.phone):
+            raise ValueError("give an email or a phone number")
+        return self
 
 
 class AddLocation(_Payload):
@@ -169,6 +230,7 @@ PAYLOADS: dict[ProposalItemAction, type[_Payload]] = {
     ProposalItemAction.ADD_DOMAIN: AddDomain,
     ProposalItemAction.ADD_ALIAS: AddAlias,
     ProposalItemAction.ADD_LOCATION: AddLocation,
+    ProposalItemAction.ADD_CONTACT: AddContact,
     ProposalItemAction.ADD_INDUSTRY: AddIndustry,
     ProposalItemAction.ADD_EQUIPMENT: AddEquipment,
     ProposalItemAction.ADD_SERVICE: AddService,
@@ -210,9 +272,12 @@ def validate_payload(
 ) -> dict[str, Any]:
     """Returns the normalised payload (JSON-safe) or raises ValidationFailed with field-level messages."""
     try:
-        return PAYLOADS[action].model_validate(payload).model_dump(mode="json")
+        out = PAYLOADS[action].model_validate(payload).model_dump(mode="json")
     except ValidationError as exc:
         raise ValidationFailed(f"Invalid {action.value} item", errors=_field_errors(exc, field)) from exc
+    if out.get("shared_domain") is False:
+        del out["shared_domain"]  # only stored when used, so existing payloads keep their shape
+    return out
 
 
 def validate_evidence(evidence: list[dict[str, Any]], *, field: str = "evidence") -> list[dict[str, Any]]:

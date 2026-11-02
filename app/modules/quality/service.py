@@ -80,6 +80,27 @@ class QualityRow:
     country: str | None
     score: float
     issues: list[str]
+    ai_checks: list[dict[str, Any]]
+
+
+# Which AI check fixes each issue (the others are fixed by researching the vendor's website).
+ISSUE_CHECK = {"no_website": "website", "no_country": "hq_country", "no_description": "description"}
+
+# Every AI check run on a vendor, from the jobs that ran them: web look-ups (one row per vendor in the job's result)
+# and website research. Read from jobs, so the history needs no table of its own.
+_CHECKS = """
+SELECT (r->>'vendor_id')::uuid AS vendor_id, coalesce(j.result->>'field', j.input->>'field', 'website') AS field,
+       r->>'status' AS status, coalesce(j.finished_at, j.created_at) AS at
+FROM jobs j CROSS JOIN LATERAL jsonb_array_elements(coalesce(j.result->'rows', '[]'::jsonb)) r
+WHERE j.type IN ('vendor_lookup', 'website_lookup') AND j.status = 'succeeded'
+UNION ALL
+SELECT (j.input->>'vendor_id')::uuid, 'research',
+       CASE WHEN j.status = 'succeeded' THEN coalesce(j.result->>'outcome', 'done') ELSE j.status::text END,
+       coalesce(j.finished_at, j.created_at)
+FROM jobs j
+WHERE j.type IN ('enrichment', 'product_catalog') AND j.status IN ('succeeded', 'partially_succeeded', 'failed')
+  AND j.input ? 'vendor_id'
+"""
 
 
 async def rescore(s: AsyncSession, vendor_ids: list[uuid.UUID] | None = None) -> int:
@@ -99,7 +120,9 @@ async def rescore(s: AsyncSession, vendor_ids: list[uuid.UUID] | None = None) ->
     return result.rowcount or 0  # type: ignore[attr-defined]
 
 
-async def dashboard(s: AsyncSession, *, issue: str | None, limit: int) -> dict[str, Any]:
+async def dashboard(
+    s: AsyncSession, *, issue: str | None, limit: int, hide_checked: bool = False, q: str | None = None
+) -> dict[str, Any]:
     params: dict[str, Any] = {"stale_days": STALE_DAYS}
     base = _FACTS.format(where="")
     counts_sql = ", ".join(f"count(*) FILTER (WHERE {cond}) AS {key}" for key, cond in _ISSUE_SQL.items())
@@ -119,7 +142,22 @@ async def dashboard(s: AsyncSession, *, issue: str | None, limit: int) -> dict[s
         .one()
     )
     issue_cols = ", ".join(f"({cond}) AS {key}" for key, cond in _ISSUE_SQL.items())
-    where = f"WHERE {_ISSUE_SQL[issue]}" if issue in _ISSUE_SQL else ""
+    conditions = [_ISSUE_SQL[issue]] if issue in _ISSUE_SQL else []
+    if hide_checked:
+        # The check that fixes this list (any check on "weakest overall") already ran for the vendor.
+        check = ISSUE_CHECK.get(issue or "", "research") if issue else None
+        same = "AND c.field = :check" if check else ""
+        conditions.append(f"NOT EXISTS (SELECT 1 FROM ({_CHECKS}) c WHERE c.vendor_id = f.id {same})")
+        if check:
+            params["check"] = check
+    if q and q.strip():
+        # Name, legal name or alias; the counts above stay for the whole knowledge base.
+        conditions.append(
+            "(v.display_name ILIKE :q OR v.legal_name ILIKE :q OR EXISTS "
+            "(SELECT 1 FROM vendor_aliases a WHERE a.vendor_id = f.id AND a.alias ILIKE :q))"
+        )
+        params["q"] = f"%{q.strip()}%"
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = (
         (
             await s.execute(
@@ -134,6 +172,19 @@ async def dashboard(s: AsyncSession, *, issue: str | None, limit: int) -> dict[s
         .mappings()
         .all()
     )
+    checks: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    if rows:
+        found = await s.execute(
+            text(
+                f"SELECT DISTINCT ON (vendor_id, field) vendor_id, field, status, at FROM ({_CHECKS}) c "
+                "WHERE vendor_id = ANY(:ids) ORDER BY vendor_id, field, at DESC"
+            ),
+            {"ids": [r["id"] for r in rows]},
+        )
+        for c in found.mappings():
+            checks.setdefault(c["vendor_id"], []).append(
+                {"field": c["field"], "status": c["status"], "at": c["at"]}
+            )
     return {
         "vendors": totals["vendors"],
         "avg_score": float(totals["avg_score"] or 0),
@@ -141,11 +192,28 @@ async def dashboard(s: AsyncSession, *, issue: str | None, limit: int) -> dict[s
         "issues": [{"key": k, "label": ISSUES[k], "count": totals[k]} for k in ISSUES],
         "worst": [
             QualityRow(
-                r["id"], r["display_name"], r["hq_country"], float(r["score"]), [k for k in ISSUES if r[k]]
+                r["id"],
+                r["display_name"],
+                r["hq_country"],
+                float(r["score"]),
+                [k for k in ISSUES if r[k]],
+                sorted(checks.get(r["id"], []), key=lambda c: c["at"], reverse=True),
             )
             for r in rows
         ],
     }
+
+
+async def researching(s: AsyncSession, vendor_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+    """Vendors with a website refresh already queued or running (so a second click doesn't pay twice)."""
+    rows = await s.execute(
+        text(
+            "SELECT DISTINCT (j.input->>'vendor_id')::uuid FROM jobs j WHERE j.type = 'enrichment' "
+            "AND j.status IN ('queued', 'running') AND j.input->>'vendor_id' = ANY(:ids)"
+        ),
+        {"ids": [str(v) for v in vendor_ids]},
+    )
+    return {r[0] for r in rows}
 
 
 async def stale_with_website(s: AsyncSession, limit: int) -> list[uuid.UUID]:

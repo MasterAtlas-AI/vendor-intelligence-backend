@@ -31,6 +31,7 @@ from app.domain.enums import ActorType, UserStatus, UserTokenPurpose
 from app.domain.permissions import permissions_for_platform_roles
 from app.domain.principal import Principal, TenantContext
 from app.infra.email import password_reset_email
+from app.infra.rate_limit import seconds_left
 from app.modules.api_keys.models import ApiKey
 from app.modules.audit.service import record_audit
 from app.modules.auth.models import RefreshToken
@@ -359,13 +360,20 @@ class AuthService:
             if key.last_used_at is None or now - key.last_used_at > API_KEY_TOUCH_INTERVAL:
                 key.last_used_at = now
                 await s.commit()
-            return Principal(
+            limit = key.rate_limit_per_minute
+            principal = Principal(
                 kind="api_key",
                 id=key.id,
                 tenant_id=key.tenant_id,
                 permissions=frozenset(key.scopes),
                 scopes=tuple(key.scopes),
             )
+        if not await self._c.rate_limiter.hit(f"apikey:{principal.id}", limit, 60):
+            raise RateLimited(
+                f"This API key is limited to {limit} requests per minute",
+                headers={"Retry-After": str(seconds_left(60)), "X-RateLimit-Limit": str(limit)},
+            )
+        return principal
 
     async def current_user(self, principal: Principal) -> CurrentUser:
         if principal.kind != "user":

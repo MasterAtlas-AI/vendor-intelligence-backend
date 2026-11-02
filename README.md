@@ -153,7 +153,7 @@ Password policy: at least 12 characters, at least 3 of lowercase, uppercase, dig
 .venv\Scripts\python -m uvicorn app.main:app --reload --port 8000
 ```
 
-- Interactive API docs: http://localhost:8000/docs
+- Interactive API docs: http://localhost:8000/api/v1/docs (ReDoc: /api/v1/redoc)
 - OpenAPI schema (used by the frontend client generator): http://localhost:8000/api/v1/openapi.json
 - Health: http://localhost:8000/health/ready
 
@@ -287,7 +287,7 @@ Conventions:
 
 ## API overview
 
-All routes are under `/api/v1`. Full contracts: [`../docs/04-api-contracts.md`](../docs/04-api-contracts.md) and `/docs`.
+All routes are under `/api/v1`. Full contracts: [`../docs/04-api-contracts.md`](../docs/04-api-contracts.md) and `/api/v1/docs`.
 
 | Area | Endpoints |
 |---|---|

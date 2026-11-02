@@ -20,6 +20,7 @@ from app.modules.vendors.models import (
     Vendor,
     VendorAlias,
     VendorCertification,
+    VendorContact,
     VendorDomain,
     VendorEquipment,
     VendorIndustry,
@@ -31,6 +32,7 @@ from app.modules.vendors.models import (
 from app.modules.vendors.schemas import (
     CategoryRef,
     CertificationRead,
+    ContactRead,
     EquipmentRead,
     LocationRead,
     ProjectRead,
@@ -289,6 +291,11 @@ class VendorQueryService:
         locations = await self.s.scalars(
             select(VendorLocation).where(VendorLocation.vendor_id == v.id, _approved(VendorLocation))
         )
+        contacts = await self.s.scalars(
+            select(VendorContact)
+            .where(VendorContact.vendor_id == v.id, _approved(VendorContact))
+            .order_by(VendorContact.contact_type, VendorContact.created_at)
+        )
         projects = await self.s.scalars(
             select(VendorProject)
             .where(VendorProject.vendor_id == v.id, _approved(VendorProject))
@@ -324,6 +331,7 @@ class VendorQueryService:
             last_verified_at=v.last_verified_at,
             knowledge_version=v.knowledge_version,
             locations=[LocationRead.model_validate(x) for x in locations],
+            contacts=[ContactRead.model_validate(x) for x in contacts],
             equipment=[
                 EquipmentRead(
                     id=e.id,

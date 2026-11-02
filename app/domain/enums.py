@@ -60,6 +60,10 @@ class JobType(StrEnum):
     DEDUP_SCAN = "dedup_scan"
     EMBEDDING = "embedding"
     REPORT = "report"
+    WEBHOOK_DELIVERY = "webhook_delivery"
+    WEBSITE_LOOKUP = "website_lookup"  # earlier name of VENDOR_LOOKUP, kept for existing job rows
+    VENDOR_LOOKUP = "vendor_lookup"
+    PRODUCT_CATALOG = "product_catalog"
 
 
 # ---------------------------------------------------------------- knowledge base (Phase 2)
@@ -148,6 +152,7 @@ class ProposalItemAction(StrEnum):
     ADD_SERVICE = "add_service"
     ADD_CERTIFICATION = "add_certification"
     ADD_PROJECT = "add_project"
+    ADD_CONTACT = "add_contact"  # a company contact point (role mailbox or switchboard), never a named person
     MERGE_VENDOR = "merge_vendor"  # payload: duplicate_vendor_id -> folded into the proposal's subject vendor
 
 

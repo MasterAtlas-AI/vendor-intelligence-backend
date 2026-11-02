@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import ARRAY, DateTime, String
+from sqlalchemy import ARRAY, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import CIDR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,3 +19,4 @@ class ApiKey(Entity, TenantScoped, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rate_limit_per_minute: Mapped[int] = mapped_column(Integer, default=120, server_default="120")

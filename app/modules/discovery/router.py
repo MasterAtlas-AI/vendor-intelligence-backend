@@ -11,6 +11,8 @@ from app.core.exceptions import NotFound, ValidationFailed
 from app.core.pagination import CursorPage
 from app.discovery.capabilities import ALL_SCOPES, CapabilityRequest
 from app.discovery.estimate import capability_estimate, estimate
+from app.discovery.products import Depth
+from app.discovery.products import estimate as products_estimate
 from app.discovery.schemas import DiscoveryEstimate, DiscoveryRequest
 from app.domain.enums import ImportRowOutcome, JobStatus, JobType, VendorStatus
 from app.domain.permissions import P
@@ -165,6 +167,45 @@ def _capability_route(kind: str, summary: str) -> None:
 _capability_route("equipment", "Research a vendor's website for equipment and certifications")
 _capability_route("services", "Research a vendor's website for services")
 _capability_route("refresh", "Re-research everything about a vendor (all fact types)")
+
+
+class ProductResearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    depth: Depth = "standard"
+
+
+@router.post(
+    "/discovery/vendors/{vendor_id}/products",
+    response_model=DiscoveryAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def discover_vendor_products(
+    vendor_id: uuid.UUID,
+    principal: Discoverer,
+    session: SessionDep,
+    c: ContainerDep,
+    body: ProductResearchRequest | None = None,
+) -> DiscoveryAccepted:
+    """Full product details: reads the vendor's product pages and datasheets (25 pages, or 60 when `deep`) and
+    proposes every product line with its specifications, each backed by a quote from the vendor's own pages."""
+    body = body or ProductResearchRequest()
+    if not c.ai.configured:
+        raise AINotAvailable("AI is not configured on this server (set OPENAI_API_KEY)")
+    vendor = await session.get(Vendor, vendor_id)
+    if vendor is None or vendor.status == VendorStatus.RETIRED:
+        raise NotFound("Vendor not found")
+    if not (vendor.website or vendor.domains):
+        raise ValidationFailed("This vendor has no website to read; add it first")
+    est = products_estimate(body.depth, c.settings)
+    await c.ai.ensure_budget(CallContext(principal.tenant_id), Decimal(str(est.typical_cost_usd)))
+    job = await JobService(session, principal, c.job_runner.notify).create(
+        JobType.PRODUCT_CATALOG,
+        {"vendor_id": str(vendor_id), "vendor_name": vendor.display_name, "depth": body.depth,
+         "estimate": est.model_dump()},
+        None,
+    )  # fmt: skip
+    return DiscoveryAccepted(job_id=job.id, status=job.status,
+                             events_url=f"{c.settings.api_prefix}/jobs/{job.id}/events", estimate=est)  # fmt: skip
 
 
 # ---------------------------------------------------------------- duplicates (curators)

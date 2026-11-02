@@ -7,6 +7,7 @@ Rules:
 - A website already owned by another vendor is a conflict (merge instead), never silently re-assigned.
 """
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -25,6 +26,7 @@ from app.modules.vendors.models import (
     Vendor,
     VendorAlias,
     VendorCertification,
+    VendorContact,
     VendorDomain,
     VendorEquipment,
     VendorIndustry,
@@ -61,10 +63,22 @@ class Applier:
         existing = await self.s.scalar(select(VendorDomain).where(VendorDomain.domain == domain))
         if existing is not None:
             if existing.vendor_id != vendor_id:
+                owner = await self.s.get(Vendor, existing.vendor_id)
+                name = owner.display_name if owner else str(existing.vendor_id)
                 raise Conflict(
-                    f"The website {domain} already belongs to another vendor ({existing.vendor_id}). "
-                    "Reject this item, or merge the two vendors.",
+                    f"The website {domain} already belongs to {name}. If they are the same company, merge the two "
+                    "vendors; if it is a group company sharing that site, save it as a group website; otherwise "
+                    "reject this item.",
                     code="duplicate_vendor",
+                    errors=[
+                        {
+                            "field": "website",
+                            "message": f"{domain} belongs to {name}",
+                            "domain": domain,
+                            "other_vendor_id": str(existing.vendor_id),
+                            "other_vendor_name": name,
+                        }
+                    ],
                 )
             return existing
         row = VendorDomain(vendor_id=vendor_id, domain=domain, is_primary=primary)
@@ -131,6 +145,7 @@ class Applier:
                 ProposalItemAction.ADD_DOMAIN: self._add_domain,
                 ProposalItemAction.ADD_ALIAS: self._add_alias,
                 ProposalItemAction.ADD_LOCATION: self._add_location,
+                ProposalItemAction.ADD_CONTACT: self._add_contact,
                 ProposalItemAction.ADD_INDUSTRY: self._add_industry,
                 ProposalItemAction.ADD_EQUIPMENT: self._add_equipment,
                 ProposalItemAction.ADD_SERVICE: self._add_service,
@@ -187,7 +202,7 @@ class Applier:
         setattr(vendor, field, value if value is not None else ("" if field == "description" else None))
         if field == "legal_name":
             vendor.normalized_name = normalize_name(value or "")
-        if field == "website" and value:
+        if field == "website" and value and not p.get("shared_domain"):
             domain = registrable_domain(value)
             if domain:
                 await self._claim_domain(vendor.id, domain, primary=False)
@@ -224,6 +239,28 @@ class Applier:
         await self.s.flush()
         return Applied("vendor_locations", row.id, vendor.id)
 
+    async def _add_contact(self, vendor: Vendor, p: dict[str, Any]) -> Applied:
+        """One row per email or phone: the same mailbox or number found again only fills in what was missing."""
+        digits = re.sub(r"\D", "", p.get("phone") or "")
+        rows = list(await self.s.scalars(select(VendorContact).where(VendorContact.vendor_id == vendor.id)))
+        row = next(
+            (r for r in rows
+             if (p.get("email") and r.email == p["email"]) or (digits and re.sub(r"\D", "", r.phone or "") == digits)),
+            None,
+        )  # fmt: skip
+        if row is None:
+            row = VendorContact(vendor_id=vendor.id, contact_type=p.get("contact_type") or "general",
+                                label=p.get("label") or "", email=p.get("email"), phone=p.get("phone"),
+                                country=p.get("country"))  # fmt: skip
+            self.s.add(row)
+            await self.s.flush()
+        else:
+            row.email = row.email or p.get("email")
+            row.phone = row.phone or p.get("phone")
+            row.label = row.label or p.get("label") or ""
+            row.country = row.country or p.get("country")
+        return Applied("vendor_contacts", row.id, vendor.id)
+
     async def _add_industry(self, vendor: Vendor, p: dict[str, Any]) -> Applied:
         industry = await self._code(Industry, p["industry_code"], "industry")
         exists = await self.s.get(VendorIndustry, (vendor.id, industry.id))
@@ -254,6 +291,12 @@ class Applier:
             )
             self.s.add(row)
             await self.s.flush()
+        else:
+            # Already known: add what's new (approved values stay as they are).
+            row.model_series = row.model_series or p.get("model_series")
+            row.standards = list(dict.fromkeys([*row.standards, *(p.get("standards") or [])]))[:20]
+            row.applications = list(dict.fromkeys([*row.applications, *(p.get("applications") or [])]))[:20]
+            row.specs = {**(p.get("specs") or {}), **row.specs}
         return Applied("vendor_equipment", row.id, vendor.id)
 
     async def _add_service(self, vendor: Vendor, p: dict[str, Any]) -> Applied:
@@ -396,6 +439,10 @@ class Applier:
             await self.s.scalars(select(VendorLocation).where(VendorLocation.vendor_id == dup.id))
         ):
             loc.vendor_id = target.id
+        for contact in list(
+            await self.s.scalars(select(VendorContact).where(VendorContact.vendor_id == dup.id))
+        ):
+            contact.vendor_id = target.id
         industries = set(
             await self.s.scalars(
                 select(VendorIndustry.industry_id).where(VendorIndustry.vendor_id == target.id)

@@ -1,10 +1,11 @@
 import uuid
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 
 from app.api.deps import ContainerDep, PrincipalDep, SessionDep, require
-from app.core.exceptions import Forbidden
+from app.core.exceptions import AppError, Forbidden, ValidationFailed
 from app.db.session import open_session
 from app.domain.enums import ProposalKind, ProposalOrigin, ProposalStatus
 from app.domain.permissions import P
@@ -12,6 +13,9 @@ from app.domain.principal import Principal, TenantContext
 from app.modules.imports.linking import link_approved_imports
 from app.modules.proposals.models import KnowledgeProposal
 from app.modules.proposals.schemas import (
+    BulkDecision,
+    BulkOutcome,
+    BulkResult,
     Decision,
     HistoryRead,
     ItemRead,
@@ -24,7 +28,9 @@ from app.modules.proposals.schemas import (
 from app.modules.proposals.service import NewItem, ProposalService, summarize
 from app.modules.search.indexing import queue_refresh_if_stale
 from app.modules.vendors.merge import finish_merges
+from app.modules.vendors.models import Vendor
 from app.modules.vendors.service import VendorQueryService
+from app.modules.webhooks.service import emit, emit_vendor_updated
 
 router = APIRouter(tags=["proposals"])
 Curator = Annotated[Principal, Depends(require(P.KNOWLEDGE_APPROVE))]
@@ -106,16 +112,86 @@ async def approve(
     proposal_id: uuid.UUID, body: Decision, principal: Curator, svc: Svc, c: ContainerDep
 ) -> ProposalDetail:
     proposal = await svc.approve(proposal_id, body.item_ids, body.note, body.version)
-    # A newly created vendor joins the lists of tenants who imported it (platform-mode, after the commit).
-    await link_approved_imports(c.sessionmaker, [proposal.id])
-    if proposal.kind == ProposalKind.MERGE_VENDORS:
-        await finish_merges(c.sessionmaker)  # organizations' own records follow the merge (platform mode)
-    if c.ai.configured:  # refresh search vectors for what just changed
-        async with open_session(c.sessionmaker, TenantContext.platform()) as s:
-            if await queue_refresh_if_stale(s):
-                await s.commit()
-                c.job_runner.notify()
+    await _after_approval(c, [Approved.of(proposal)])
     return await _detail(svc, principal, proposal)
+
+
+@dataclass(frozen=True)
+class Approved:
+    """What the follow-up steps need from an approved proposal, read while it is loaded (a later rollback in the same
+    session would expire the ORM object)."""
+
+    id: uuid.UUID
+    kind: ProposalKind
+    status: ProposalStatus
+    title: str
+    origin_tenant_id: uuid.UUID | None
+    subject_vendor_id: uuid.UUID | None
+
+    @classmethod
+    def of(cls, p: KnowledgeProposal) -> "Approved":
+        return cls(p.id, p.kind, p.status, p.title, p.origin_tenant_id, p.subject_vendor_id)
+
+
+async def _after_approval(c: ContainerDep, proposals: list[Approved]) -> None:
+    """What follows approvals, once per batch (platform mode, after the commits)."""
+    if not proposals:
+        return
+    # A newly created vendor joins the lists of tenants who imported it.
+    await link_approved_imports(c.sessionmaker, [p.id for p in proposals])
+    if any(p.kind == ProposalKind.MERGE_VENDORS for p in proposals):
+        await finish_merges(c.sessionmaker)  # organizations' own records follow the merge
+    async with open_session(c.sessionmaker, TenantContext.platform()) as s:
+        if c.ai.configured:  # refresh search vectors for what just changed
+            await queue_refresh_if_stale(s)
+        # Webhooks: the submitting organization hears its proposal was decided; organizations with the vendor on
+        # their list hear it changed.
+        for proposal in proposals:
+            if proposal.origin_tenant_id:
+                await emit(
+                    s,
+                    proposal.origin_tenant_id,
+                    "proposal.approved",
+                    {
+                        "proposal_id": str(proposal.id),
+                        "kind": proposal.kind.value,
+                        "status": proposal.status.value,
+                        "title": proposal.title,
+                        "vendor_id": str(proposal.subject_vendor_id or ""),
+                    },
+                )
+            if proposal.subject_vendor_id and (vendor := await s.get(Vendor, proposal.subject_vendor_id)):
+                await emit_vendor_updated(s, vendor.id, vendor.display_name, vendor.knowledge_version)
+        await s.commit()
+    c.job_runner.notify()
+
+
+@router.post("/admin/proposals/bulk", response_model=BulkResult)
+async def decide_in_bulk(body: BulkDecision, principal: Curator, svc: Svc, c: ContainerDep) -> BulkResult:
+    """Approve or reject several proposals (every pending item of each). Each one succeeds or fails on its own: a
+    proposal that changed since it was listed, or whose facts clash (e.g. a website another vendor owns), is
+    reported and left as it was."""
+    if body.action == "reject" and not body.note.strip():
+        raise ValidationFailed(
+            "Give a reason", errors=[{"field": "note", "message": "Required when rejecting"}]
+        )
+    results: list[BulkOutcome] = []
+    approved: list[Approved] = []
+    for target in body.proposals:
+        try:
+            if body.action == "approve":
+                proposal = await svc.approve(target.id, None, body.note, target.version)
+                approved.append(Approved.of(proposal))
+            else:
+                proposal = await svc.reject(target.id, None, body.note, target.version)
+            results.append(BulkOutcome(id=target.id, ok=True, status=proposal.status))
+            svc.s.expunge_all()  # done with it; keeps a later rollback from touching it
+        except AppError as exc:
+            await svc.s.rollback()  # this proposal stays as it was; carry on with the next
+            results.append(BulkOutcome(id=target.id, ok=False, error=exc.detail or exc.title))
+    await _after_approval(c, approved)
+    done = sum(1 for r in results if r.ok)
+    return BulkResult(done=done, failed=len(results) - done, results=results)
 
 
 @router.post("/admin/proposals/{proposal_id}/reject", response_model=ProposalDetail)

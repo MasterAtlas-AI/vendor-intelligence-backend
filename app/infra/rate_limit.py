@@ -1,5 +1,14 @@
 import time
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Protocol
+
+from sqlalchemy import text
+
+from app.db.session import open_session
+from app.domain.principal import TenantContext
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class RateLimiter(Protocol):
@@ -27,3 +36,34 @@ class InMemoryRateLimiter:
             # Keep memory bounded: drop buckets whose window has ended.
             self._buckets = {k: v for k, v in self._buckets.items() if v[1] > now}
         return count + 1 <= limit
+
+
+class PostgresRateLimiter:
+    """Fixed-window counters in Postgres (`api_rate_counters`), shared by every API instance. One upsert per hit;
+    expired windows are deleted by the maintenance loop."""
+
+    def __init__(self, sessionmaker: "async_sessionmaker[AsyncSession]") -> None:
+        self.sessionmaker = sessionmaker
+
+    async def hit(self, key: str, limit: int, window_seconds: int) -> bool:
+        return (await self.count(key, window_seconds)) <= limit
+
+    async def count(self, key: str, window_seconds: int) -> int:
+        """Counts one hit and returns the window's total so far."""
+        now = time.time()
+        window = int(now // window_seconds)
+        expires = datetime.fromtimestamp((window + 1) * window_seconds, UTC)
+        async with open_session(self.sessionmaker, TenantContext.platform()) as s:
+            total = await s.scalar(
+                text(
+                    "INSERT INTO api_rate_counters (bucket, count, expires_at) VALUES (:b, 1, :e) "
+                    "ON CONFLICT (bucket) DO UPDATE SET count = api_rate_counters.count + 1 RETURNING count"
+                ),
+                {"b": f"{key}:{window_seconds}:{window}"[:200], "e": expires},
+            )
+            await s.commit()
+        return int(total or 0)
+
+
+def seconds_left(window_seconds: int) -> int:
+    return max(1, window_seconds - int(time.time()) % window_seconds)

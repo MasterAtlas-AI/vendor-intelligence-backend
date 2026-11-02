@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import DBAPIError
 
 from app.ai.service import register_ai_error_handler
@@ -32,6 +33,7 @@ from app.modules.taxonomy.router import router as taxonomy_router
 from app.modules.tenants.router import router as tenants_router
 from app.modules.users.router import router as users_router
 from app.modules.vendors.router import router as vendors_router
+from app.modules.webhooks.router import router as webhooks_router
 
 log = get_logger(__name__)
 
@@ -68,8 +70,8 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         title=f"{settings.app_name} API",
         version=settings.app_version,
         openapi_url=f"{settings.api_prefix}/openapi.json",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url=f"{settings.api_prefix}/docs",
+        redoc_url=f"{settings.api_prefix}/redoc",
         lifespan=lifespan,
     )
     app.state.container = container
@@ -87,7 +89,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
             "Idempotency-Key",
             "X-Request-ID",
         ],
-        expose_headers=["X-Request-ID", "Location", "Retry-After"],
+        expose_headers=["X-Request-ID", "Location", "Retry-After", "X-RateLimit-Limit"],
     )
     app.add_middleware(RequestContextMiddleware)
     register_exception_handlers(app)
@@ -114,10 +116,15 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         rfqs_router,
         reports_router,
         analytics_router,
+        webhooks_router,
     ):
         v1.include_router(router)
     app.include_router(v1)
     app.include_router(health.router)
+
+    # The docs moved under the versioned prefix; keep the old bookmarks working.
+    for old, new in (("/docs", f"{settings.api_prefix}/docs"), ("/redoc", f"{settings.api_prefix}/redoc")):
+        app.add_api_route(old, lambda new=new: RedirectResponse(new), include_in_schema=False)
     return app
 
 

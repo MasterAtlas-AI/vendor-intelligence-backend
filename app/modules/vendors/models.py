@@ -119,6 +119,23 @@ class VendorLocation(Entity, Base):
     status: Mapped[FactStatus] = mapped_column(fact_status, default=FactStatus.APPROVED)
 
 
+class VendorContact(Entity, Base):
+    """A company contact point the vendor publishes: a role mailbox (sales@, info@) and/or a phone line. By policy
+    there are no named people here (personal data); the payload validator refuses personal-looking mailboxes."""
+
+    __tablename__ = "vendor_contacts"
+
+    vendor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("vendors.id", ondelete="CASCADE"), index=True)
+    contact_type: Mapped[str] = mapped_column(
+        String(20)
+    )  # general, sales, service, support, procurement, other
+    label: Mapped[str] = mapped_column(String(120), default="")  # e.g. "Singapore office", "Spare parts"
+    email: Mapped[str | None] = mapped_column(String(254))
+    phone: Mapped[str | None] = mapped_column(String(40))
+    country: Mapped[str | None] = mapped_column(CHAR(2))
+    status: Mapped[FactStatus] = mapped_column(fact_status, default=FactStatus.APPROVED)
+
+
 class VendorIndustry(Base):
     __tablename__ = "vendor_industries"
 

@@ -7,11 +7,14 @@ from sqlalchemy import func, select
 
 from app.discovery.capabilities import capability_discovery_handler
 from app.discovery.pipeline import vendor_discovery_handler
+from app.discovery.products import product_catalog_handler
 from app.domain.enums import JobType
 from app.modules.imports.job import excel_import_handler, pdf_import_handler
+from app.modules.quality.lookup import vendor_lookup_handler
 from app.modules.reports.service import report_handler
 from app.modules.search.indexing import embedding_handler
 from app.modules.vendors.dedup import dedup_scan_handler
+from app.modules.webhooks.service import webhook_delivery_handler
 from app.workers.runner import Handler, JobContext
 
 
@@ -41,4 +44,8 @@ HANDLERS: dict[str, Handler] = {
     JobType.DEDUP_SCAN: dedup_scan_handler,
     JobType.EMBEDDING: embedding_handler,
     JobType.REPORT: report_handler,
+    JobType.WEBHOOK_DELIVERY: webhook_delivery_handler,
+    JobType.WEBSITE_LOOKUP: vendor_lookup_handler,
+    JobType.VENDOR_LOOKUP: vendor_lookup_handler,
+    JobType.PRODUCT_CATALOG: product_catalog_handler,
 }

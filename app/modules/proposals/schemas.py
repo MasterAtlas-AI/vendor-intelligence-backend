@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -76,6 +76,32 @@ class ItemCounts(BaseModel):
     pending: int = 0
     applied: int = 0
     rejected: int = 0
+
+
+class BulkTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: uuid.UUID
+    version: int = Field(description="The version you saw in the list (optimistic locking)")
+
+
+class BulkDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["approve", "reject"]
+    proposals: list[BulkTarget] = Field(min_length=1, max_length=100)
+    note: str = Field(default="", max_length=2000, description="Required when rejecting")
+
+
+class BulkOutcome(BaseModel):
+    id: uuid.UUID
+    ok: bool
+    status: ProposalStatus | None = None
+    error: str | None = None
+
+
+class BulkResult(BaseModel):
+    done: int
+    failed: int
+    results: list[BulkOutcome]
 
 
 class ProposalSummary(BaseModel):

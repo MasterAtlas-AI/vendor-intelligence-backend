@@ -14,6 +14,7 @@ from app.modules.quality.service import rescore
 from app.modules.search.indexing import queue_refresh_if_stale
 from app.modules.users.models import UserToken
 from app.modules.vendors.merge import finish_merges
+from app.modules.webhooks.models import RateCounter
 
 log = get_logger(__name__)
 
@@ -44,6 +45,7 @@ async def run_maintenance(
         cutoff = datetime.now(UTC) - EXPIRED_TOKEN_RETENTION
         purged_refresh = await s.execute(delete(RefreshToken).where(RefreshToken.expires_at < cutoff))
         purged_user = await s.execute(delete(UserToken).where(UserToken.expires_at < cutoff))
+        await s.execute(delete(RateCounter).where(RateCounter.expires_at < datetime.now(UTC)))
         await s.commit()
     log.info(
         "maintenance.done",

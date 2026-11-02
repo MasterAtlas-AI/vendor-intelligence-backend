@@ -3,36 +3,52 @@
 1. Plan (one small AI call): which searches to run and which named vendors to look up.
 2. Look up (no AI): the hybrid search (local query understanding, so no extra AI cost) and vendor records with
    approved facts, sources and the organization's own AVL status.
-3. Answer (one AI call) from those records only, citing them as [V1], [V2]. Citations to anything outside the
-   records are removed before the answer is returned, so a cited vendor is always one the user can open.
+3. Answer (one AI call, with web search) from those records, citing them as [V1], [V2], plus a separate "From the
+   web" part citing the pages found as [W1], [W2]. Citations to records that weren't given, or to pages the search
+   didn't return, are removed before the answer is returned.
+4. Workspace (no AI): the requirement understood (the searches' merged intent), a shortlist of the records with a
+   0-1 score per dimension and flags for gaps, and the steps taken with their timings.
 
-Two AI calls per message (about US$0.003), metered to the organization's AI budget like any other call.
-The conversation is kept by the client; nothing is stored server-side.
+Two AI calls per message (about US$0.01-0.02 with the web search), metered to the organization's AI budget.
+Messages that aren't about vendors skip the web search.
+The client sends the recent conversation with each question; each question and its answer are also saved to the
+user's chat history (`AssistantConversation`), so chats can be reopened, renamed and deleted.
 """
 
 import re
+import time
 import uuid
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.ports import Citation
 from app.ai.service import AINotAvailable, AiService, CallContext
 from app.core.exceptions import NotFound
 from app.domain.enums import VendorStatus
-from app.domain.normalization import normalize_website
+from app.domain.normalization import normalize_website, registrable_domain
 from app.domain.principal import Principal
+from app.modules.assistant.models import AssistantConversation, AssistantMessage
 from app.modules.assistant.prompts import ANSWER, PLAN
 from app.modules.assistant.schemas import (
+    AgentStep,
     AssistantAnswer,
     AssistantPlan,
     ChatAction,
     ChatRequest,
     ChatResponse,
     CitedVendor,
+    ConversationDetail,
+    DimensionScores,
+    SavedMessage,
+    ShortlistRow,
     SuggestedAction,
+    WebPage,
+    WebSource,
 )
-from app.modules.search.schemas import SearchFilters, SearchRequest
+from app.modules.search.schemas import SearchFilters, SearchHit, SearchIntent, SearchRequest
 from app.modules.search.service import SearchService
 from app.modules.vendors.models import Vendor
 from app.modules.vendors.schemas import VendorDetail
@@ -44,6 +60,18 @@ HITS_PER_SEARCH = 6
 MAX_RECORDS = 12
 HISTORY_MESSAGES = 10
 REF = re.compile(r"\[(V\d{1,2})\]")
+WEB_REF = re.compile(r"\[(W\d{1,2})\]")
+# Follow-ups must be the user's next questions, not the assistant offering to do something.
+OFFER = re.compile(r"^(do you want|would you like|should i|shall i|can i|may i|want me)\b", re.IGNORECASE)
+TITLE_CHARS = 80
+
+
+def _title(question: str) -> str:
+    """A saved chat's first title: its first question, shortened at a word (no AI call; the user can rename it)."""
+    text = " ".join(question.split())
+    if len(text) <= TITLE_CHARS:
+        return text
+    return text[:TITLE_CHARS].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
 
 
 def _record(ref: str, v: VendorDetail) -> dict[str, Any]:
@@ -88,6 +116,108 @@ def _record(ref: str, v: VendorDetail) -> dict[str, Any]:
     }
 
 
+AVL_SCORE = {"approved": 1.0, "conditional": 0.6, "unassessed": 0.3, "not_approved": 0.0, "blacklisted": 0.0}
+REFERENCES_FOR_FULL_SCORE = 5
+
+
+def _plan_summary(plan: AssistantPlan, previous: list[VendorDetail]) -> str:
+    kind = {
+        "find_vendors": "Find vendors",
+        "vendor_details": "Vendor details",
+        "compare": "Compare vendors",
+        "knowledge_question": "Question",
+        "out_of_scope": "Not about vendors",
+    }.get(plan.intent, plan.intent.replace("_", " ").capitalize())
+    parts = [kind]
+    if plan.vendor_names:
+        parts.append("named: " + ", ".join(plan.vendor_names[:MAX_NAMED]))
+    if previous:
+        parts.append(f"{len(previous)} vendor{'s' if len(previous) != 1 else ''} from the previous answer")
+    if plan.my_vendors_only:
+        parts.append("your vendors only")
+    return "; ".join(parts)
+
+
+def _merge_intents(intents: list[SearchIntent]) -> SearchIntent | None:
+    """One requirement from the searches run: every equipment type, standard, country... any of them asked for."""
+    if not intents:
+        return None
+
+    def union(field: str) -> list[str]:
+        return list(dict.fromkeys(x for i in intents for x in getattr(i, field)))
+
+    return SearchIntent(
+        equipment_categories=union("equipment_categories"),
+        service_categories=union("service_categories"),
+        industries=union("industries"),
+        certifications=union("certifications"),
+        standards=union("standards"),
+        countries=union("countries"),
+        keywords=" · ".join(dict.fromkeys(i.keywords.strip() for i in intents if i.keywords.strip()))[:300],
+    )
+
+
+def _shortlist_row(
+    ref: str, v: VendorDetail, hit: SearchHit | None, req: SearchIntent | None
+) -> ShortlistRow:
+    s = hit.scores if hit else None
+    relevance = [x for x in (s.semantic, s.text) if x is not None] if s else []
+    references = len(v.projects)
+    fpso = sum(1 for p in v.projects if p.facility_type and "fpso" in p.facility_type.lower())
+    avl = v.tenant.avl_status.value if v.tenant else None
+    data_quality = s.data_quality if s else float(v.data_quality_score or 0)
+
+    flags: list[str] = []
+    if avl == "blacklisted":
+        flags.append("Blacklisted by your organization")
+    elif avl == "not_approved":
+        flags.append("Not approved on your vendor list")
+    if req and req.standards:
+        have = {x.lower().replace(" ", "") for e in v.equipment for x in e.standards}
+        have |= {c.certification.name.lower().replace(" ", "") for c in v.certifications}
+        missing = [x for x in req.standards if not any(x.lower().replace(" ", "") in h for h in have)]
+        if missing:
+            flags.append(f"{', '.join(missing)} not on record")
+    if not references:
+        flags.append("No project references on record")
+    if not v.certifications:
+        flags.append("No certifications on record")
+    elif any(c.valid_to and c.valid_to < date.today() for c in v.certifications):
+        flags.append("A certificate has expired")
+    if not (v.website or v.domains):
+        flags.append("No website on record")
+    if data_quality < 0.4:
+        flags.append("Sparse record")
+
+    def clamp(x: float | None) -> float | None:
+        return None if x is None else round(max(0.0, min(1.0, x)), 3)
+
+    return ShortlistRow(
+        vendor_id=v.id,
+        ref=ref,
+        name=v.display_name,
+        country=v.hq_country,
+        city=v.hq_city,
+        website=v.website,
+        avl_status=avl,
+        scores=DimensionScores(
+            relevance=clamp(max(relevance)) if relevance else None,
+            equipment=clamp(s.equipment) if s else None,
+            standards=clamp(s.standards_certifications) if s else None,
+            industry=clamp(s.industries) if s else None,
+            track_record=round(min(1.0, (references + fpso) / REFERENCES_FOR_FULL_SCORE), 3),
+            data_quality=clamp(data_quality) or 0.0,
+            approved_vendor=AVL_SCORE.get(avl or "unassessed", 0.3),
+        ),
+        matched=[r.label[:160] for r in (hit.reasons if hit else [])][:4],
+        products=len(v.equipment),
+        references=references,
+        fpso_references=fpso,
+        certifications=len(v.certifications),
+        flags=flags,
+    )
+
+
 class AssistantService:
     def __init__(self, session: AsyncSession, principal: Principal, ai: AiService) -> None:
         self.s = session
@@ -125,6 +255,8 @@ class AssistantService:
     async def chat(self, req: ChatRequest) -> ChatResponse:
         if not self.ai.configured:
             raise AINotAvailable("AI is not configured on this server (set OPENAI_API_KEY)")
+        # Checked before any AI call, so a stale or foreign chat id costs nothing.
+        saved = await self._owned(req.conversation_id) if req.conversation_id else None
         history = req.messages[-HISTORY_MESSAGES:]
         # Earlier answers are shortened: they're context, and repeating them in full invites repetitive replies.
         conversation = [
@@ -135,6 +267,15 @@ class AssistantService:
             for m in history
         ]
         vendors_q = VendorQueryService(self.s, self.principal)
+        started_at = datetime.now(UTC)
+        steps: list[AgentStep] = []
+        clock = time.perf_counter()
+
+        def step(key: str, label: str, detail: str) -> None:
+            nonlocal clock
+            now = time.perf_counter()
+            steps.append(AgentStep(key=key, label=label, detail=detail, ms=round((now - clock) * 1000)))
+            clock = now
 
         previous: list[VendorDetail] = []
         for vid in req.context_vendor_ids:
@@ -152,10 +293,13 @@ class AssistantService:
                 previous=[v.display_name for v in previous],
             )
         ).output
+        step("understand", "Understand the request", _plan_summary(plan, previous))
 
         ordered: list[uuid.UUID] = [v.id for v in previous]
         ordered += [v for v in await self._vendors_named(plan.vendor_names) if v not in ordered]
         searched: list[str] = []
+        hits: dict[uuid.UUID, SearchHit] = {}
+        intents: list[SearchIntent] = []
         search = SearchService(self.s, self.principal, self.ai)
         filters = SearchFilters(my_vendors_only=plan.my_vendors_only and self.principal.tenant_id is not None)
         for query in [q.strip() for q in plan.search_queries if q.strip()][:MAX_SEARCHES]:
@@ -163,7 +307,18 @@ class AssistantService:
             result = await search.search(
                 SearchRequest(query=query, parser="local", filters=filters, limit=HITS_PER_SEARCH)
             )
+            intents.append(result.intent)
+            for h in result.results:
+                if h.vendor.id not in hits or h.confidence > hits[h.vendor.id].confidence:
+                    hits[h.vendor.id] = h
             ordered += [h.vendor.id for h in result.results if h.vendor.id not in ordered]
+        if searched:
+            step(
+                "search_kb",
+                "Search the knowledge base",
+                f"{len(searched)} search{'es' if len(searched) > 1 else ''}, {len(hits)} vendor"
+                f"{'s' if len(hits) != 1 else ''} matched",
+            )
 
         details: list[VendorDetail] = []
         for vid in ordered[:MAX_RECORDS]:
@@ -172,26 +327,126 @@ class AssistantService:
             except NotFound:
                 continue
         refs = {f"V{i}": v for i, v in enumerate(details, start=1)}
+        step(
+            "load_records",
+            "Load vendor records",
+            f"{len(details)} record{'s' if len(details) != 1 else ''} with approved facts and sources",
+        )
 
-        answer = (
-            await self.ai.run(
-                ANSWER,
-                AssistantAnswer,
-                self._call,
-                conversation=conversation,
-                records=[_record(ref, v) for ref, v in refs.items()],
-            )
-        ).output
-        text, removed = self._ground(answer.answer, refs)
+        web = plan.intent != "out_of_scope"
+        answered = await self.ai.run(
+            ANSWER,
+            AssistantAnswer,
+            self._call,
+            web_search=web,
+            conversation=conversation,
+            records=[_record(ref, v) for ref, v in refs.items()],
+        )
+        answer = answered.output
+        pages = self._web_pages(answer.web_sources, answered.citations)
+        text, removed = self._ground(answer.answer, refs, pages)
         cited = [r for r in dict.fromkeys(REF.findall(text)) if r in refs]
-        return ChatResponse(
+        web_cited = [pages[r] for r in dict.fromkeys(WEB_REF.findall(text)) if r in pages]
+        step(
+            "answer",
+            "Search the web and write the answer" if web else "Write the answer",
+            (f"{len(web_cited)} web page{'s' if len(web_cited) != 1 else ''} cited, " if web else "")
+            + f"{len(cited)} vendor record{'s' if len(cited) != 1 else ''} cited",
+        )
+        step(
+            "check",
+            "Check citations",
+            f"Removed {removed} unsupported citation{'s' if removed != 1 else ''}"
+            if removed
+            else "Every citation points at a record or a page the search returned",
+        )
+        requirement = _merge_intents(intents)
+        shortlist = [_shortlist_row(ref, v, hits.get(v.id), requirement) for ref, v in refs.items()]
+        if shortlist:
+            step("rank", "Rank the shortlist", f"{len(shortlist)} vendors scored on up to 7 dimensions")
+        reply = ChatResponse(
             answer=text,
+            web_sources=web_cited,
             vendors=[self._cited(r, refs[r]) for r in cited],
-            follow_ups=[f.strip()[:200] for f in answer.follow_ups if f.strip()][:3],
+            follow_ups=[
+                f.strip()[:200] for f in answer.follow_ups if f.strip() and not OFFER.match(f.strip())
+            ][:3],
             actions=self._actions(answer.actions, refs),
             searched=searched,
             removed_refs=removed,
+            requirement=requirement,
+            shortlist=shortlist,
+            steps=steps,
+            started_at=started_at,
         )
+        return await self._save(saved, req.messages[-1].content, reply)
+
+    # ------------------------------------------------------------------ saved chats
+
+    async def _owned(self, conversation_id: uuid.UUID) -> AssistantConversation:
+        row = await self.s.get(AssistantConversation, conversation_id)
+        if row is None or self.principal.user_id is None or row.user_id != self.principal.user_id:
+            raise NotFound("Chat not found")
+        return row
+
+    async def _save(
+        self, saved: AssistantConversation | None, question: str, reply: ChatResponse
+    ) -> ChatResponse:
+        """Adds the question and its answer to the user's chat (a new one if none was given). API keys have no
+        user, so their chats aren't saved."""
+        if self.principal.user_id is None:
+            return reply
+        if saved is None:
+            saved = AssistantConversation(
+                tenant_id=self.principal.tenant_id, user_id=self.principal.user_id, title=_title(question)
+            )
+            self.s.add(saved)
+            await self.s.flush()
+        reply.conversation_id = saved.id
+        self.s.add_all([
+            AssistantMessage(conversation_id=saved.id, tenant_id=saved.tenant_id, role="user", content=question),
+            AssistantMessage(conversation_id=saved.id, tenant_id=saved.tenant_id, role="assistant",
+                             content=reply.answer, reply=reply.model_dump(mode="json")),
+        ])  # fmt: skip
+        saved.updated_at = datetime.now(UTC)  # most recently used chats first
+        await self.s.commit()
+        return reply
+
+    async def conversations(self, limit: int) -> list[AssistantConversation]:
+        return list(
+            await self.s.scalars(
+                select(AssistantConversation)
+                .where(AssistantConversation.user_id == self.principal.user_id)
+                .order_by(AssistantConversation.updated_at.desc())
+                .limit(limit)
+            )
+        )
+
+    async def conversation(self, conversation_id: uuid.UUID) -> ConversationDetail:
+        row = await self._owned(conversation_id)
+        messages = await self.s.scalars(
+            select(AssistantMessage)
+            .where(AssistantMessage.conversation_id == row.id)
+            .order_by(AssistantMessage.created_at, AssistantMessage.id)
+        )
+        return ConversationDetail(
+            id=row.id,
+            title=row.title,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            messages=[SavedMessage.model_validate(m) for m in messages],
+        )
+
+    async def rename(self, conversation_id: uuid.UUID, title: str) -> AssistantConversation:
+        row = await self._owned(conversation_id)
+        row.title = " ".join(title.split())[:200] or row.title
+        await self.s.commit()
+        await self.s.refresh(row)
+        return row
+
+    async def delete(self, conversation_id: uuid.UUID) -> None:
+        await self.s.delete(await self._owned(conversation_id))
+        await self.s.commit()
 
     @staticmethod
     def _actions(suggested: list[SuggestedAction], refs: dict[str, VendorDetail]) -> list[ChatAction]:
@@ -219,7 +474,7 @@ class AssistantService:
                 out.append(
                     ChatAction(
                         kind="discover_vendors",
-                        label="Discover vendors on the web",
+                        label="Add new suppliers to the knowledge base",
                         brief=a.brief.strip()[:1000],
                     )
                 )
@@ -237,15 +492,38 @@ class AssistantService:
         )
 
     @staticmethod
-    def _ground(text: str, refs: dict[str, VendorDetail]) -> tuple[str, int]:
-        """Drops citations to records that weren't provided (the model must not point at anything else)."""
+    def _web_pages(listed: list[WebPage], citations: list[Citation]) -> dict[str, WebSource]:
+        """The web pages the answer may cite: only those on a site the search actually returned."""
+        searched = {registrable_domain(c.url) for c in citations} - {None}
+        pages: dict[str, WebSource] = {}
+        for p in listed[:10]:
+            ref, url = p.ref.strip().strip("[]"), p.url.strip()
+            if (
+                not WEB_REF.fullmatch(f"[{ref}]")
+                or not url.startswith(("http://", "https://"))
+                or ref in pages
+            ):
+                continue
+            if registrable_domain(url) in searched:
+                title = p.title.strip() or next((c.title for c in citations if c.url == url), "") or url
+                pages[ref] = WebSource(ref=ref, title=title[:200], url=url[:1000])
+        return pages
+
+    @staticmethod
+    def _ground(
+        text: str, refs: dict[str, VendorDetail], pages: dict[str, WebSource] | None = None
+    ) -> tuple[str, int]:
+        """Drops citations to records that weren't provided and to pages the search didn't return (the model must
+        not point at anything else)."""
         removed = 0
+        known = set(refs) | set(pages or {})
 
         def keep(m: re.Match[str]) -> str:
             nonlocal removed
-            if m.group(1) in refs:
+            if m.group(1) in known:
                 return m.group(0)
             removed += 1
             return ""
 
-        return re.sub(r"[ \t]{2,}", " ", REF.sub(keep, text)).strip(), removed
+        text = WEB_REF.sub(keep, REF.sub(keep, text))
+        return re.sub(r"[ \t]{2,}", " ", text).strip(), removed

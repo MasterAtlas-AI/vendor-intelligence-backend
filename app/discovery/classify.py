@@ -1,5 +1,7 @@
 """Map extracted capability terms onto taxonomy codes: the local vocabulary first (free), the AI only for leftovers."""
 
+import re
+
 from app.ai.service import AiService, CallContext
 from app.discovery.prompts import CLASSIFY
 from app.discovery.schemas import Classification
@@ -61,12 +63,21 @@ async def classify(
         terms=[f"{kind}: {term}" for kind, term in unique],
     )
     out: dict[tuple[str, str], str] = {}
-    by_term = {f"{kind}: {term}".lower(): (kind, term) for kind, term in unique}
+    # The AI is asked to echo "kind: term"; accept it with or without the kind, in any case or punctuation.
+    by_term: dict[str, tuple[str, str]] = {}
+    for kind, term in unique:
+        by_term[_norm(f"{kind}: {term}")] = (kind, term)
+        by_term.setdefault(_norm(term), (kind, term))
     for item in result.output.terms:
-        key = by_term.get(item.term.strip().lower())
+        key = by_term.get(_norm(item.term))
         if key is None or not item.code:
             continue
         kind = key[0]
-        if (kind, item.code) in tax.ids:  # the AI may only pick existing codes of the right kind
-            out[key] = item.code
+        code = re.sub(r"^\s*[a-z]+\s*[/:]\s*", "", item.code.strip())  # "equipment / pumps.x" -> "pumps.x"
+        if (kind, code) in tax.ids:  # the AI may only pick existing codes of the right kind
+            out[key] = code
     return out
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()

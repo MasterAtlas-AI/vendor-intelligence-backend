@@ -36,6 +36,9 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# Internal housekeeping jobs organizations didn't ask for: no job.completed webhook.
+QUIET_JOB_TYPES = {"webhook_delivery", "embedding", "dedup_scan"}
+
 
 class JobCancelled(Exception):
     pass
@@ -273,6 +276,21 @@ class JobRunner:
             job.locked_by = None
             job.locked_until = None
             job.finished_at = datetime.now(UTC)
+            if job.tenant_id is not None and job.type not in QUIET_JOB_TYPES:
+                from app.modules.webhooks.service import emit  # local: webhooks import this module
+
+                await emit(
+                    s,
+                    job.tenant_id,
+                    "job.completed",
+                    {
+                        "job_id": str(job.id),
+                        "type": job.type,
+                        "status": job.status.value,
+                        "result": job.result or {},
+                        "error": (job.error or {}).get("message"),
+                    },
+                )
             await s.commit()
         log.info("job.finished", job_id=str(job_id), status=outcome["status"])
 

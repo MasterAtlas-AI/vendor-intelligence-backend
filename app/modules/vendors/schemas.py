@@ -76,6 +76,16 @@ class LocationRead(BaseModel):
     country: str | None
 
 
+class ContactRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    contact_type: str
+    label: str
+    email: str | None
+    phone: str | None
+    country: str | None
+
+
 class ProjectRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -106,6 +116,7 @@ class VendorDetail(VendorSummary):
     last_verified_at: datetime | None
     knowledge_version: int
     locations: list[LocationRead]
+    contacts: list[ContactRead] = []
     equipment: list[EquipmentRead]
     services: list[ServiceRead]
     certifications: list[CertificationRead]

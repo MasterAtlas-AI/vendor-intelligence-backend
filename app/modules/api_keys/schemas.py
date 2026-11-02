@@ -11,6 +11,7 @@ class ApiKeyCreate(BaseModel):
     scopes: list[str] = Field(min_length=1, max_length=20)
     expires_at: datetime | None = None
     ip_allowlist: list[str] = Field(default_factory=list, max_length=20)
+    rate_limit_per_minute: int = Field(default=120, ge=10, le=10_000)
 
     @field_validator("expires_at")
     @classmethod
@@ -35,6 +36,7 @@ class ApiKeyRead(BaseModel):
     expires_at: datetime | None
     last_used_at: datetime | None
     revoked_at: datetime | None
+    rate_limit_per_minute: int
     created_at: datetime
     created_by: uuid.UUID | None
 

@@ -4,6 +4,7 @@ from app.ai.models import AiUsageEvent
 from app.crawler.models import WebPage
 from app.db.base import Base
 from app.modules.api_keys.models import ApiKey
+from app.modules.assistant.models import AssistantConversation, AssistantMessage
 from app.modules.audit.models import AuditLog
 from app.modules.auth.models import RefreshToken
 from app.modules.imports.models import ImportRow, Upload
@@ -30,11 +31,14 @@ from app.modules.vendors.models import (
     VendorService,
     VendorSource,
 )
+from app.modules.webhooks.models import RateCounter, WebhookDelivery, WebhookEndpoint
 
 __all__ = [
     "AiUsageEvent",
     "ApiKey",
     "ApprovalHistory",
+    "AssistantConversation",
+    "AssistantMessage",
     "AuditLog",
     "Base",
     "CertificationType",
@@ -49,6 +53,7 @@ __all__ = [
     "ProjectMember",
     "ProjectVendor",
     "ProposalItem",
+    "RateCounter",
     "RefreshToken",
     "Report",
     "Rfq",
@@ -77,4 +82,6 @@ __all__ = [
     "VendorService",
     "VendorSource",
     "WebPage",
+    "WebhookDelivery",
+    "WebhookEndpoint",
 ]

@@ -56,6 +56,7 @@ class ApiKeyService:
             scopes=scopes,
             ip_allowlist=body.ip_allowlist,
             expires_at=body.expires_at,
+            rate_limit_per_minute=body.rate_limit_per_minute,
         )
         self.s.add(key)
         await self.s.flush()

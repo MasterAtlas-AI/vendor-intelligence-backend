@@ -9,7 +9,7 @@ from app.core.config import Settings
 from app.core.security import JwtManager
 from app.db.session import build_engine, build_sessionmaker
 from app.infra.email import EmailSender, build_email_sender
-from app.infra.rate_limit import InMemoryRateLimiter, RateLimiter
+from app.infra.rate_limit import PostgresRateLimiter, RateLimiter
 from app.workers.runner import JobRunner
 
 
@@ -38,7 +38,7 @@ def build_container(settings: Settings) -> Container:
         engine=engine,
         sessionmaker=sessionmaker,
         jwt=JwtManager(settings),
-        rate_limiter=InMemoryRateLimiter(),
+        rate_limiter=PostgresRateLimiter(sessionmaker),  # shared by every API instance
         email=build_email_sender(settings),
         job_runner=JobRunner(sessionmaker, settings, ai=ai),
         ai=ai,
