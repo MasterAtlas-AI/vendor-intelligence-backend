@@ -89,11 +89,12 @@ async def test_assistant_answers_from_the_knowledge_base(
             "understand",
             "search_kb",
             "load_records",
+            "history",
             "answer",
             "check",
             "rank",
         ]
-        assert body["steps"][4]["detail"] == "Removed 2 unsupported citations" and body["started_at"]
+        assert body["steps"][5]["detail"] == "Removed 2 unsupported citations" and body["started_at"]
         assert [v["vendor_id"] for v in body["vendors"]] == [str(vid)] and body["searched"] == [
             f"BB2 pumps {tag}"
         ]

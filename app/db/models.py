@@ -7,6 +7,14 @@ from app.modules.api_keys.models import ApiKey
 from app.modules.assistant.models import AssistantConversation, AssistantMessage
 from app.modules.audit.models import AuditLog
 from app.modules.auth.models import RefreshToken
+from app.modules.equipment.models import (
+    EquipmentAttribute,
+    KnowledgeNote,
+    MelRow,
+    ProcurementRecord,
+    ProjectEquipment,
+    SavedSearch,
+)
 from app.modules.imports.models import ImportRow, Upload
 from app.modules.jobs.models import Job
 from app.modules.projects.models import Project, ProjectMember, ProjectVendor, Scorecard, ScorecardTemplate
@@ -42,14 +50,19 @@ __all__ = [
     "AuditLog",
     "Base",
     "CertificationType",
+    "EquipmentAttribute",
     "EquipmentCategory",
     "FactSource",
     "ImportRow",
     "Industry",
     "Job",
+    "KnowledgeNote",
     "KnowledgeProposal",
+    "MelRow",
     "Permission",
+    "ProcurementRecord",
     "Project",
+    "ProjectEquipment",
     "ProjectMember",
     "ProjectVendor",
     "ProposalItem",
@@ -60,6 +73,7 @@ __all__ = [
     "RfqVendor",
     "Role",
     "RolePermission",
+    "SavedSearch",
     "Scorecard",
     "ScorecardTemplate",
     "SearchHistory",

@@ -37,6 +37,7 @@ from app.domain.normalization import normalize_country, normalize_name
 from app.modules.audit.service import record_audit
 from app.modules.imports.importer import ImportOptions, ParsedRow, Taxonomy, VendorListImporter, _fact_key
 from app.modules.imports.pdf_extract import label_variants
+from app.modules.tenants.policy import ai_controls
 from app.modules.vendors.dedup import JUDGE_MIN_CONFIDENCE, judge, profile
 from app.modules.vendors.models import Vendor
 from app.workers.runner import JobContext
@@ -263,8 +264,10 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
     if not queries:
         raise AIError("The AI returned no search queries")
 
-    # 2. search
+    # 2. search (limited to the organization's approved public sources when it chose that)
     await progress("searching", 8)
+    async with ctx.session() as policy_session:
+        allowed = (await ai_controls(policy_session, ctx.tenant_id)).allowed_domains()
     findings: list[tuple[list[Any], list[Citation]]] = []
     failed: list[str] = []
     sem = asyncio.Semaphore(SEARCH_CONCURRENCY)
@@ -273,7 +276,13 @@ async def vendor_discovery_handler(ctx: JobContext) -> dict[str, Any]:
         async with sem:
             try:
                 res = await ai.run(
-                    SEARCH, SearchFindings, call, web_search=True, query=query, criteria=criteria
+                    SEARCH,
+                    SearchFindings,
+                    call,
+                    web_search=True,
+                    allowed_domains=allowed,
+                    query=query,
+                    criteria=criteria,
                 )
             except BudgetExceeded:
                 raise

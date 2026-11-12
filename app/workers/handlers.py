@@ -9,6 +9,7 @@ from app.discovery.capabilities import capability_discovery_handler
 from app.discovery.pipeline import vendor_discovery_handler
 from app.discovery.products import product_catalog_handler
 from app.domain.enums import JobType
+from app.modules.equipment.mel import mel_import_handler
 from app.modules.imports.job import excel_import_handler, pdf_import_handler
 from app.modules.quality.lookup import vendor_lookup_handler
 from app.modules.reports.service import report_handler
@@ -48,4 +49,5 @@ HANDLERS: dict[str, Handler] = {
     JobType.WEBSITE_LOOKUP: vendor_lookup_handler,
     JobType.VENDOR_LOOKUP: vendor_lookup_handler,
     JobType.PRODUCT_CATALOG: product_catalog_handler,
+    JobType.MEL_IMPORT: mel_import_handler,
 }

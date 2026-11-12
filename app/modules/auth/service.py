@@ -101,6 +101,7 @@ def build_current_user(user: User, tenant: Tenant | None, *, impersonating: bool
         platform_roles=list(user.platform_roles),
         permissions=sorted(perms),
         impersonating=impersonating,
+        department=user.department,
     )
 
 

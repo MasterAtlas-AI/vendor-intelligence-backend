@@ -63,7 +63,9 @@ class CreateVendor(_Payload):
         return normalized
 
 
-VendorField = Literal["legal_name", "display_name", "website", "hq_country", "hq_city", "description"]
+VendorField = Literal[
+    "legal_name", "display_name", "website", "hq_country", "hq_city", "description", "parent_company"
+]
 
 
 class UpdateVendorField(_Payload):
@@ -104,7 +106,7 @@ class AddAlias(_Payload):
     alias_type: Literal["trade", "former", "subsidiary", "abbrev"] = "trade"
 
 
-CONTACT_TYPES = ("general", "sales", "service", "support", "procurement", "other")
+CONTACT_TYPES = ("general", "sales", "service", "support", "procurement", "agent", "other")
 # Mailbox names that are roles, not people (anything else that looks like "first.last" is refused).
 ROLE_MAILBOXES = (
     "info", "sales", "service", "services", "support", "contact", "enquir", "inquir", "office", "admin", "hello",
@@ -124,7 +126,10 @@ def company_mailbox(email: str) -> bool:
 
 
 class AddContact(_Payload):
-    contact_type: Literal["general", "sales", "service", "support", "procurement", "other"] = "general"
+    # agent: an authorized agent or representative (a company, named in `label`), never a person
+    contact_type: Literal["general", "sales", "service", "support", "procurement", "agent", "other"] = (
+        "general"
+    )
     label: str = Field(default="", max_length=120)
     email: str | None = Field(default=None, max_length=254)
     phone: str | None = Field(default=None, max_length=40)

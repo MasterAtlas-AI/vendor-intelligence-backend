@@ -21,6 +21,7 @@ from app.modules.assistant.router import router as assistant_router
 from app.modules.audit.router import router as audit_router
 from app.modules.auth.router import router as auth_router
 from app.modules.discovery.router import router as discovery_router
+from app.modules.equipment.router import router as equipment_router
 from app.modules.imports.router import router as imports_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.projects.router import router as projects_router
@@ -111,6 +112,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         discovery_router,
         search_router,
         projects_router,
+        equipment_router,
         assistant_router,
         quality_router,
         rfqs_router,

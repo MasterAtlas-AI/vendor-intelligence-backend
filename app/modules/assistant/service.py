@@ -29,6 +29,7 @@ from app.ai.service import AINotAvailable, AiService, CallContext
 from app.core.exceptions import NotFound
 from app.domain.enums import VendorStatus
 from app.domain.normalization import normalize_website, registrable_domain
+from app.domain.permissions import P
 from app.domain.principal import Principal
 from app.modules.assistant.models import AssistantConversation, AssistantMessage
 from app.modules.assistant.prompts import ANSWER, PLAN
@@ -42,14 +43,18 @@ from app.modules.assistant.schemas import (
     CitedVendor,
     ConversationDetail,
     DimensionScores,
+    HistoryMatch,
     SavedMessage,
     ShortlistRow,
     SuggestedAction,
     WebPage,
     WebSource,
 )
+from app.modules.equipment.schemas import EquipmentSearch, ProjectEquipmentRead
+from app.modules.equipment.service import EquipmentService
 from app.modules.search.schemas import SearchFilters, SearchHit, SearchIntent, SearchRequest
 from app.modules.search.service import SearchService
+from app.modules.tenants.policy import ai_controls
 from app.modules.vendors.models import Vendor
 from app.modules.vendors.schemas import VendorDetail
 from app.modules.vendors.service import VendorQueryService
@@ -61,6 +66,8 @@ MAX_RECORDS = 12
 HISTORY_MESSAGES = 10
 REF = re.compile(r"\[(V\d{1,2})\]")
 WEB_REF = re.compile(r"\[(W\d{1,2})\]")
+HIST_REF = re.compile(r"\[(H\d{1,2})\]")  # the organization's own equipment lines
+HISTORY_LINES = 10
 # Follow-ups must be the user's next questions, not the assistant offering to do something.
 OFFER = re.compile(r"^(do you want|would you like|should i|shall i|can i|may i|want me)\b", re.IGNORECASE)
 TITLE_CHARS = 80
@@ -74,9 +81,12 @@ def _title(question: str) -> str:
     return text[:TITLE_CHARS].rsplit(" ", 1)[0].rstrip(",.;:") + "…"
 
 
-def _record(ref: str, v: VendorDetail) -> dict[str, Any]:
-    """What the answer model sees about one vendor: approved facts only, compact."""
-    return {
+def _record(
+    ref: str, v: VendorDetail, private: bool = False, history: tuple[int, int] | None = None
+) -> dict[str, Any]:
+    """What the answer model sees about one vendor: approved facts only, compact. The organization's own data (AVL
+    status, tags, project history) is included only when it allows sharing private data with the AI provider."""
+    record = {
         "ref": ref,
         "name": v.display_name,
         "legal_name": v.legal_name if v.legal_name != v.display_name else None,
@@ -84,8 +94,6 @@ def _record(ref: str, v: VendorDetail) -> dict[str, Any]:
         "city": v.hq_city,
         "website": v.website,
         "description": v.description[:600] or None,
-        "avl_status": v.tenant.avl_status.value if v.tenant else None,
-        "tags": v.tenant.tags if v.tenant else [],
         "equipment": [
             " - ".join(
                 x
@@ -114,10 +122,19 @@ def _record(ref: str, v: VendorDetail) -> dict[str, Any]:
             for p in v.projects[:10]
         ],
     }
+    if private:
+        record["avl_status"] = v.tenant.avl_status.value if v.tenant else None
+        record["tags"] = v.tenant.tags if v.tenant else []
+        if history and history[0]:
+            record["our_history"] = f"used on {history[0]} of our projects ({history[1]} equipment lines)"
+    return record
 
 
 AVL_SCORE = {"approved": 1.0, "conditional": 0.6, "unassessed": 0.3, "not_approved": 0.0, "blacklisted": 0.0}
 REFERENCES_FOR_FULL_SCORE = 5
+OUR_PROJECTS_FOR_FULL_SCORE = (
+    3  # used on this many of the organization's own projects = full experience score
+)
 
 
 def _plan_summary(plan: AssistantPlan, previous: list[VendorDetail]) -> str:
@@ -158,7 +175,12 @@ def _merge_intents(intents: list[SearchIntent]) -> SearchIntent | None:
 
 
 def _shortlist_row(
-    ref: str, v: VendorDetail, hit: SearchHit | None, req: SearchIntent | None
+    ref: str,
+    v: VendorDetail,
+    hit: SearchHit | None,
+    req: SearchIntent | None,
+    history: tuple[int, int] | None = None,
+    has_history: bool = False,
 ) -> ShortlistRow:
     s = hit.scores if hit else None
     relevance = [x for x in (s.semantic, s.text) if x is not None] if s else []
@@ -208,14 +230,34 @@ def _shortlist_row(
             track_record=round(min(1.0, (references + fpso) / REFERENCES_FOR_FULL_SCORE), 3),
             data_quality=clamp(data_quality) or 0.0,
             approved_vendor=AVL_SCORE.get(avl or "unassessed", 0.3),
+            our_experience=round(min(1.0, (history or (0, 0))[0] / OUR_PROJECTS_FOR_FULL_SCORE), 3)
+            if has_history
+            else None,
         ),
         matched=[r.label[:160] for r in (hit.reasons if hit else [])][:4],
         products=len(v.equipment),
         references=references,
         fpso_references=fpso,
         certifications=len(v.certifications),
+        our_projects=(history or (0, 0))[0],
+        our_equipment=(history or (0, 0))[1],
         flags=flags,
     )
+
+
+def _history_record(ref: str, e: ProjectEquipmentRead) -> dict[str, Any]:
+    """One of the organization's own equipment lines, as the answer model sees it (only when sharing is allowed)."""
+    return {
+        "ref": ref,
+        "equipment": e.name,
+        "tag": e.tag or None,
+        "category": e.category_name,
+        "vendor": e.vendor_name or None,
+        "model": e.model or None,
+        "project": f"{e.project.name} ({e.project.year})" if e.project.year else e.project.name,
+        "attributes": e.attributes,
+        "verification": e.verification,
+    }
 
 
 class AssistantService:
@@ -333,18 +375,43 @@ class AssistantService:
             f"{len(details)} record{'s' if len(details) != 1 else ''} with approved facts and sources",
         )
 
+        # The organization's own history is matched here, locally; it reaches the AI only if the organization allows.
+        controls = await ai_controls(self.s, self.principal.tenant_id)
+        has_history = self.principal.tenant_id is not None and self.principal.has(P.EQUIPMENT_READ)
+        our_history = (
+            await EquipmentService(self.s, self.principal).history_counts([v.id for v in details])
+            if has_history
+            else {}
+        )
+        # SOW 10: internal knowledge first. Equipment lines from the organization's own projects that match the request,
+        # found locally; shown beside the answer, and sent to the AI only when the organization allows it.
+        requirement = _merge_intents(intents)
+        lines = await self._history_lines(requirement, details, our_history) if has_history else []
+        hist_refs = {f"H{i}": e for i, e in enumerate(lines, start=1)}
+        if has_history:
+            step(
+                "history",
+                "Search your project history",
+                f"{len(lines)} matching equipment line{'s' if len(lines) != 1 else ''} in your projects"
+                + ("" if controls.share_private_data or not lines else " (kept on the server)"),
+            )
+        shared = hist_refs if controls.share_private_data else {}
         web = plan.intent != "out_of_scope"
         answered = await self.ai.run(
             ANSWER,
             AssistantAnswer,
             self._call,
             web_search=web,
+            allowed_domains=controls.allowed_domains(),
             conversation=conversation,
-            records=[_record(ref, v) for ref, v in refs.items()],
+            records=[
+                _record(ref, v, controls.share_private_data, our_history.get(v.id)) for ref, v in refs.items()
+            ],
+            history=[_history_record(ref, e) for ref, e in shared.items()],
         )
         answer = answered.output
         pages = self._web_pages(answer.web_sources, answered.citations)
-        text, removed = self._ground(answer.answer, refs, pages)
+        text, removed = self._ground(answer.answer, refs, pages, shared)
         cited = [r for r in dict.fromkeys(REF.findall(text)) if r in refs]
         web_cited = [pages[r] for r in dict.fromkeys(WEB_REF.findall(text)) if r in pages]
         step(
@@ -360,8 +427,10 @@ class AssistantService:
             if removed
             else "Every citation points at a record or a page the search returned",
         )
-        requirement = _merge_intents(intents)
-        shortlist = [_shortlist_row(ref, v, hits.get(v.id), requirement) for ref, v in refs.items()]
+        shortlist = [
+            _shortlist_row(ref, v, hits.get(v.id), requirement, our_history.get(v.id), has_history)
+            for ref, v in refs.items()
+        ]
         if shortlist:
             step("rank", "Rank the shortlist", f"{len(shortlist)} vendors scored on up to 7 dimensions")
         reply = ChatResponse(
@@ -378,8 +447,43 @@ class AssistantService:
             shortlist=shortlist,
             steps=steps,
             started_at=started_at,
+            private_data_shared=controls.share_private_data,
+            web_limited_to=controls.allowed_domains() or [],
+            history_matches=[
+                HistoryMatch(
+                    ref=ref,
+                    equipment_id=e.id,
+                    tag=e.tag,
+                    name=e.name,
+                    category_name=e.category_name,
+                    project_name=e.project.name,
+                    project_year=e.project.year,
+                    vendor_id=e.vendor_id,
+                    vendor_name=e.vendor_name,
+                    verification=e.verification,
+                )
+                for ref, e in hist_refs.items()
+            ],
         )
         return await self._save(saved, req.messages[-1].content, reply)
+
+    async def _history_lines(
+        self,
+        requirement: SearchIntent | None,
+        details: list[VendorDetail],
+        counts: dict[uuid.UUID, tuple[int, int]],
+    ) -> list[ProjectEquipmentRead]:
+        """The organization's equipment lines for the requested categories, else for the shortlisted vendors it used."""
+        svc = EquipmentService(self.s, self.principal)
+        found: dict[uuid.UUID, ProjectEquipmentRead] = {}
+        for code in (requirement.equipment_categories if requirement else [])[:3]:
+            for e in (await svc.search(EquipmentSearch(category_code=code, limit=HISTORY_LINES))).items:
+                found.setdefault(e.id, e)
+        if not found:
+            for v in [v for v in details if counts.get(v.id, (0, 0))[0]][:3]:
+                for e in (await svc.search(EquipmentSearch(vendor_id=v.id, limit=4))).items:
+                    found.setdefault(e.id, e)
+        return list(found.values())[:HISTORY_LINES]
 
     # ------------------------------------------------------------------ saved chats
 
@@ -511,12 +615,15 @@ class AssistantService:
 
     @staticmethod
     def _ground(
-        text: str, refs: dict[str, VendorDetail], pages: dict[str, WebSource] | None = None
+        text: str,
+        refs: dict[str, VendorDetail],
+        pages: dict[str, WebSource] | None = None,
+        history: dict[str, Any] | None = None,
     ) -> tuple[str, int]:
         """Drops citations to records that weren't provided and to pages the search didn't return (the model must
         not point at anything else)."""
         removed = 0
-        known = set(refs) | set(pages or {})
+        known = set(refs) | set(pages or {}) | set(history or {})
 
         def keep(m: re.Match[str]) -> str:
             nonlocal removed
@@ -525,5 +632,5 @@ class AssistantService:
             removed += 1
             return ""
 
-        text = WEB_REF.sub(keep, REF.sub(keep, text))
+        text = HIST_REF.sub(keep, WEB_REF.sub(keep, REF.sub(keep, text)))
         return re.sub(r"[ \t]{2,}", " ", text).strip(), removed

@@ -131,16 +131,18 @@ class ImportService:
     async def create_upload(self, filename: str, content_type: str | None, data: bytes) -> UploadRead:
         filename = (filename or "upload").replace("\\", "/").rsplit("/", 1)[-1][:255]
         ext = extension(filename)
-        if ext not in SPREADSHEET_EXTENSIONS and ext != ".pdf":
+        if ext not in SPREADSHEET_EXTENSIONS and ext not in (".pdf", ".docx"):
             raise ValidationFailed(
-                "Upload an Excel workbook (.xlsx), a CSV file or a PDF",
+                "Upload an Excel workbook (.xlsx), a CSV file, a PDF or a Word document (.docx)",
                 errors=[{"field": "file", "message": f"unsupported file type: {filename}"}],
             )
         if not data:
             raise ValidationFailed("The file is empty", errors=[{"field": "file", "message": "empty file"}])
-        if ext == ".pdf":
-            kind = UploadKind.PDF
-            pdf, ex = await read_and_extract(data, await Taxonomy.load(self.s), self.settings.pdf_max_pages)
+        if ext in (".pdf", ".docx"):
+            kind = UploadKind.PDF  # a vendor document: PDF or Word, read the same way
+            pdf, ex = await read_and_extract(
+                data, await Taxonomy.load(self.s), self.settings.pdf_max_pages, filename
+            )
             if not pdf.page_count:
                 raise ValidationFailed(
                     "The PDF has no pages", errors=[{"field": "file", "message": "no pages"}]
@@ -288,7 +290,7 @@ class ImportService:
         import would do with it. Nothing is written."""
         upload = await self._upload(request.upload_id, with_data=True, kind=UploadKind.PDF)
         taxonomy = await Taxonomy.load(self.s)
-        pdf, ex = await read_and_extract(upload.data, taxonomy, self.settings.pdf_max_pages)
+        pdf, ex = await read_and_extract(upload.data, taxonomy, self.settings.pdf_max_pages, upload.filename)
         match: PdfVendorMatch | None = None
         if request.vendor is not None:
             options = options_from(request)

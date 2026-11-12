@@ -121,7 +121,12 @@ class TenantService:
 
     async def update_own(self, body: TenantSelfUpdate) -> Tenant:
         tenant = await self.get_own()
-        return await self._apply(tenant, body.model_dump(exclude_unset=True), "tenant.settings_updated")
+        values = body.model_dump(exclude_unset=True, exclude={"ai"})
+        if body.ai is not None:
+            settings = dict(values.get("settings", tenant.settings) or {})
+            settings["ai"] = body.ai.model_dump()
+            values["settings"] = settings
+        return await self._apply(tenant, values, "tenant.settings_updated")
 
     async def _apply(self, tenant: Tenant, values: dict[str, Any], action: str) -> Tenant:
         before = {k: getattr(tenant, k) for k in values}

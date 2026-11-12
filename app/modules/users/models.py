@@ -64,6 +64,7 @@ class User(Entity, Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Bumped whenever roles change, so clients can refresh cached permissions.
     perms_version: Mapped[int] = mapped_column(Integer, default=1)
+    department: Mapped[str | None] = mapped_column(String(30))  # engineering, procurement... (SOW 14)
 
     roles: Mapped[list[Role]] = relationship(secondary="user_roles", lazy="selectin", viewonly=True)
 

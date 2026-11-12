@@ -64,6 +64,7 @@ class JobType(StrEnum):
     WEBSITE_LOOKUP = "website_lookup"  # earlier name of VENDOR_LOOKUP, kept for existing job rows
     VENDOR_LOOKUP = "vendor_lookup"
     PRODUCT_CATALOG = "product_catalog"
+    MEL_IMPORT = "mel_import"
 
 
 # ---------------------------------------------------------------- knowledge base (Phase 2)

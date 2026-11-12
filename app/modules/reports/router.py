@@ -67,7 +67,10 @@ async def get_report(report_id: uuid.UUID, svc: Svc) -> ReportRead:
 
 
 @router.get("/reports/{report_id}/download", response_class=Response)
-async def download_report(report_id: uuid.UUID, svc: Svc) -> Response:
+async def download_report(
+    report_id: uuid.UUID, svc: Svc, _: Annotated[Principal, Depends(require(P.DATA_EXPORT))]
+) -> Response:
+    """Downloading data out of the system needs data:export (SOW 21); viewing a report's status doesn't."""
     report = await svc.get(report_id, with_data=True)
     if report.status != "ready" or report.data is None:
         raise Conflict("The report isn't ready yet" if report.status == "queued" else "The report failed")

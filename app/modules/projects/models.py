@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -22,6 +23,10 @@ from app.db.base import Base
 from app.db.mixins import Entity, TenantScoped
 
 PROJECT_STATUSES = ("active", "on_hold", "closed", "archived")
+# sourcing: a live sourcing workspace (members only); historical: an executed project whose equipment, procurement
+# and lessons form the organization's knowledge (readable by everyone with equipment:read).
+PROJECT_KINDS = ("sourcing", "historical")
+PROJECT_LOCATIONS = ("offshore", "onshore")
 MEMBER_ROLES = ("owner", "editor", "viewer")
 VENDOR_STAGES = ("longlist", "shortlist", "selected", "rejected")
 SCORECARD_STATUSES = ("draft", "final")
@@ -36,6 +41,8 @@ class Project(Entity, TenantScoped, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "code", name="uq_tenant_projects_tenant_code"),
         CheckConstraint(_in("status", PROJECT_STATUSES), name="status"),
+        CheckConstraint(_in("kind", PROJECT_KINDS), name="kind"),
+        CheckConstraint(f"location IS NULL OR {_in('location', PROJECT_LOCATIONS)}", name="location"),
     )
 
     code: Mapped[str | None] = mapped_column(String(40))  # the organization's own project number
@@ -45,6 +52,9 @@ class Project(Entity, TenantScoped, Base):
     country: Mapped[str | None] = mapped_column(CHAR(2))
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
+    kind: Mapped[str] = mapped_column(String(12), default="sourcing")
+    year: Mapped[int | None] = mapped_column(SmallInteger)  # execution / delivery year
+    location: Mapped[str | None] = mapped_column(String(10))  # offshore | onshore
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 

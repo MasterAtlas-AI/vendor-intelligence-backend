@@ -12,6 +12,10 @@ ProjectStatus = Literal["active", "on_hold", "closed", "archived"]
 MemberRole = Literal["owner", "editor", "viewer"]
 VendorStage = Literal["longlist", "shortlist", "selected", "rejected"]
 ScorecardStatus = Literal["draft", "final"]
+# sourcing: a live sourcing workspace (members only); historical: an executed project, part of the organization's
+# knowledge (its equipment, procurement and lessons are readable by everyone with equipment:read).
+ProjectKind = Literal["sourcing", "historical"]
+ProjectLocation = Literal["offshore", "onshore"]
 
 
 class _Country(BaseModel):
@@ -34,6 +38,9 @@ class ProjectCreate(_Country):
     facility_type: str | None = Field(default=None, max_length=60)
     country: str | None = None
     description: str = Field(default="", max_length=5000)
+    kind: ProjectKind = "sourcing"
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    location: ProjectLocation | None = None
 
 
 class ProjectUpdate(_Country):
@@ -46,6 +53,9 @@ class ProjectUpdate(_Country):
     country: str | None = None
     description: str | None = Field(default=None, max_length=5000)
     status: ProjectStatus | None = None
+    kind: ProjectKind | None = None
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    location: ProjectLocation | None = None
 
 
 class TenantProjectRead(BaseModel):
@@ -58,6 +68,9 @@ class TenantProjectRead(BaseModel):
     country: str | None
     description: str
     status: ProjectStatus
+    kind: ProjectKind = "sourcing"
+    year: int | None = None
+    location: ProjectLocation | None = None
     version: int
     created_at: datetime
     updated_at: datetime

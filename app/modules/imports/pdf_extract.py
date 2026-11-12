@@ -19,6 +19,7 @@ from pypdf import PdfReader
 
 from app.core.exceptions import ValidationFailed
 from app.domain.normalization import normalize_name, registrable_domain
+from app.modules.imports.docx import read_docx_pages
 
 MAX_PAGE_CHARS = 200_000
 SNIPPET_BEFORE, SNIPPET_AFTER = 120, 200
@@ -43,6 +44,14 @@ class PdfText:
     @property
     def truncated(self) -> bool:
         return self.page_count > len(self.pages)
+
+
+def read_document(data: bytes, filename: str, *, max_pages: int) -> PdfText:
+    """A vendor document's text: a PDF, or a Word file (.docx) read the same way."""
+    if filename.lower().endswith(".docx"):
+        pages, count = read_docx_pages(data, max_pages)
+        return PdfText(pages=[p[:MAX_PAGE_CHARS] for p in pages], page_count=count, scanned=False)
+    return read_pdf(data, max_pages=max_pages)
 
 
 def read_pdf(data: bytes, *, max_pages: int) -> PdfText:

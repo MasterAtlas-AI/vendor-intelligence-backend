@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import Conflict, ValidationFailed
 from app.domain.enums import FactStatus, LocationType, ProposalItemAction, SourceKind, VendorStatus
 from app.domain.normalization import normalize_name, registrable_domain
+from app.modules.equipment.extract import extract_spec_attributes
 from app.modules.proposals.models import ProposalItem
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
 from app.modules.vendors.models import (
@@ -288,6 +289,7 @@ class Applier:
                 standards=p.get("standards") or [],
                 specs=p.get("specs") or {},
                 applications=p.get("applications") or [],
+                attributes=extract_spec_attributes(p.get("specs") or {}),
             )
             self.s.add(row)
             await self.s.flush()
@@ -297,6 +299,7 @@ class Applier:
             row.standards = list(dict.fromkeys([*row.standards, *(p.get("standards") or [])]))[:20]
             row.applications = list(dict.fromkeys([*row.applications, *(p.get("applications") or [])]))[:20]
             row.specs = {**(p.get("specs") or {}), **row.specs}
+            row.attributes = extract_spec_attributes(row.specs)
         return Applied("vendor_equipment", row.id, vendor.id)
 
     async def _add_service(self, vendor: Vendor, p: dict[str, Any]) -> Applied:

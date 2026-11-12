@@ -34,6 +34,14 @@ class SearchFilters(BaseModel):
     countries: list[str] = Field(default_factory=list, max_length=20)
     avl_status: list[AvlStatus] = Field(default_factory=list, max_length=5)
     my_vendors_only: bool = False
+    # SOW 16: a product to a standard ("API 610", "ABS"), a certification code, products in a category (and under it)
+    standards: list[str] = Field(default_factory=list, max_length=10)
+    certifications: list[str] = Field(default_factory=list, max_length=10)
+    equipment_category: str | None = Field(default=None, max_length=160)
+    # The organization's own history: vendors it has used (on any project, or on these projects)
+    used_by_us: bool = False
+    used_on_projects: list[uuid.UUID] = Field(default_factory=list, max_length=20)
+    technically_accepted_by_us: bool = False  # passed one of the organization's technical bid evaluations
 
 
 class SearchRequest(BaseModel):

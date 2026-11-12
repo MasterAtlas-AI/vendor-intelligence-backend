@@ -57,7 +57,7 @@ class ChatAction(BaseModel):
 class AgentStep(BaseModel):
     """One step the assistant took for a message, shown as the agent's plan and in the activity log."""
 
-    key: Literal["understand", "search_kb", "load_records", "answer", "check", "rank"]
+    key: Literal["understand", "search_kb", "load_records", "history", "answer", "check", "rank"]
     label: str
     detail: str
     ms: int
@@ -73,6 +73,9 @@ class DimensionScores(BaseModel):
     track_record: float  # project references on record
     data_quality: float  # how complete and verified the vendor's record is
     approved_vendor: float  # the organization's own AVL status (0.3 when not assessed)
+    our_experience: float | None = (
+        None  # used on the organization's own projects (None: no access to its history)
+    )
 
 
 class ShortlistRow(BaseModel):
@@ -89,7 +92,26 @@ class ShortlistRow(BaseModel):
     references: int
     fpso_references: int
     certifications: int
+    our_projects: int = (
+        0  # the organization's own projects it was used on (matched locally, never sent to the AI)
+    )
+    our_equipment: int = 0
     flags: list[str]  # gaps worth checking ("No project references on record")
+
+
+class HistoryMatch(BaseModel):
+    """One of the organization's own equipment lines matching the request (SOW 10: internal knowledge first)."""
+
+    ref: str  # "H1": cited in the answer only when the organization shares its data with the AI
+    equipment_id: uuid.UUID
+    tag: str
+    name: str
+    category_name: str | None
+    project_name: str
+    project_year: int | None
+    vendor_id: uuid.UUID | None
+    vendor_name: str
+    verification: str
 
 
 class ChatResponse(BaseModel):
@@ -107,6 +129,16 @@ class ChatResponse(BaseModel):
     shortlist: list[ShortlistRow] = Field(default_factory=list)
     steps: list[AgentStep] = Field(default_factory=list)
     started_at: datetime | None = None
+    # SOW 12, 21: what the answer is and what it was allowed to use.
+    notice: str = (
+        "AI-generated suggestions from the knowledge base and public sources. They are not approved engineering "
+        "decisions; final technical and commercial decisions remain with the responsible engineer."
+    )
+    private_data_shared: bool = False  # the organization's own data was included in the AI prompt
+    web_limited_to: list[str] = Field(default_factory=list)  # web search limited to these approved domains
+    history_matches: list[HistoryMatch] = Field(
+        default_factory=list
+    )  # the organization's own matching equipment
 
 
 # ---------------------------------------------------------------- saved chats

@@ -194,6 +194,95 @@ ORG_RFQS = text("""
 """)
 
 
+# ---------------------------------------------------------------- the organization's own project history (SOW 23)
+
+HIST_BY_CATEGORY = text("""
+    SELECT top.name AS label, count(*) AS value
+    FROM project_equipment e
+    JOIN equipment_categories c ON c.id = e.category_id
+    JOIN equipment_categories top ON top.code = split_part(c.code, '.', 1)
+    WHERE e.tenant_id = :tenant AND e.verification <> 'archived'
+    GROUP BY top.name ORDER BY value DESC
+""")
+HIST_MOST_USED = text("""
+    SELECT coalesce(v.display_name, max(e.vendor_name)) AS label, count(DISTINCT e.project_id) AS value
+    FROM project_equipment e LEFT JOIN vendors v ON v.id = e.vendor_id
+    WHERE e.tenant_id = :tenant AND e.verification <> 'archived' AND (e.vendor_id IS NOT NULL OR e.vendor_name <> '')
+    GROUP BY coalesce(e.vendor_id::text, lower(e.vendor_name)), v.display_name
+    ORDER BY value DESC, label LIMIT 15
+""")
+HIST_BY_YEAR = text("""
+    SELECT p.year::text AS label, count(*) AS value
+    FROM project_equipment e JOIN tenant_projects p ON p.id = e.project_id
+    WHERE e.tenant_id = :tenant AND e.verification <> 'archived' AND p.year IS NOT NULL
+    GROUP BY p.year ORDER BY p.year
+""")
+HIST_TOTALS = text("""
+    SELECT
+      (SELECT count(*) FROM project_equipment WHERE tenant_id = :tenant AND verification <> 'archived') AS equipment,
+      (SELECT count(*) FROM tenant_projects WHERE tenant_id = :tenant AND kind = 'historical') AS historical_projects,
+      (SELECT count(*) FROM procurement_records WHERE tenant_id = :tenant) AS purchase_orders,
+      (SELECT count(*) FROM knowledge_notes WHERE tenant_id = :tenant) AS notes,
+      (SELECT count(*) FROM project_equipment WHERE tenant_id = :tenant AND created_at >= :since) AS added_recently,
+      (SELECT count(*) FROM mel_rows WHERE tenant_id = :tenant AND status = 'pending') AS awaiting_review
+""")
+HIST_LONG_LEAD = text("""
+    SELECT coalesce(c.name, e.name, 'Unclassified') AS category, coalesce(v.display_name, r.vendor_name) AS vendor,
+           r.lead_time_weeks AS weeks, p.name AS project
+    FROM procurement_records r
+    JOIN tenant_projects p ON p.id = r.project_id
+    LEFT JOIN project_equipment e ON e.id = r.equipment_id
+    LEFT JOIN equipment_categories c ON c.id = e.category_id
+    LEFT JOIN vendors v ON v.id = r.vendor_id
+    WHERE r.tenant_id = :tenant AND r.lead_time_weeks IS NOT NULL
+    ORDER BY r.lead_time_weeks DESC LIMIT 10
+""")
+HIST_PERFORMANCE = text("""
+    SELECT coalesce(v.display_name, max(r.vendor_name)) AS vendor, count(*) AS orders,
+           avg(r.lead_time_weeks) AS avg_lead_weeks, avg(r.on_time::int) AS on_time_rate,
+           avg(r.performance_rating) AS avg_rating
+    FROM procurement_records r LEFT JOIN vendors v ON v.id = r.vendor_id
+    WHERE r.tenant_id = :tenant
+    GROUP BY coalesce(r.vendor_id::text, lower(r.vendor_name)), v.display_name
+    HAVING count(*) > 0
+    ORDER BY orders DESC LIMIT 15
+""")
+
+
+def _num(value: Any, digits: int = 2) -> float | None:
+    return round(float(value), digits) if value is not None else None
+
+
+async def history(s: AsyncSession, tenant_id: uuid.UUID, days: int) -> dict[str, Any]:
+    params = {"tenant": tenant_id, "since": datetime.now(UTC) - timedelta(days=days)}
+    totals = (await s.execute(HIST_TOTALS, params)).mappings().one()
+    return {
+        **{k: int(v or 0) for k, v in totals.items()},
+        "equipment_by_category": _bars(_rows(await s.execute(HIST_BY_CATEGORY, params))),
+        "most_used_vendors": _bars(_rows(await s.execute(HIST_MOST_USED, params))),
+        "equipment_by_year": _bars(_rows(await s.execute(HIST_BY_YEAR, params))),
+        "long_lead": [
+            {
+                "category": r["category"],
+                "vendor": r["vendor"] or "",
+                "weeks": int(r["weeks"]),
+                "project": r["project"],
+            }
+            for r in _rows(await s.execute(HIST_LONG_LEAD, params))
+        ],
+        "vendor_performance": [
+            {
+                "vendor": r["vendor"] or "Unknown",
+                "orders": int(r["orders"]),
+                "avg_lead_weeks": _num(r["avg_lead_weeks"], 1),
+                "on_time_rate": _num(r["on_time_rate"]),
+                "avg_rating": _num(r["avg_rating"], 1),
+            }
+            for r in _rows(await s.execute(HIST_PERFORMANCE, params))
+        ],
+    }
+
+
 async def organization(s: AsyncSession, tenant_id: uuid.UUID, days: int, budget_usd: float) -> dict[str, Any]:
     params = {"tenant": tenant_id, "since": datetime.now(UTC) - timedelta(days=days), "month": month_start()}
     activity = (await s.execute(ORG_ACTIVITY, params)).mappings().one()
@@ -211,4 +300,5 @@ async def organization(s: AsyncSession, tenant_id: uuid.UUID, days: int, budget_
         "ai_budget_month": budget_usd,
         "active_projects": int(activity["active_projects"] or 0),
         "reports": int(activity["reports"] or 0),
+        "history": await history(s, tenant_id, days),
     }

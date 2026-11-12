@@ -324,6 +324,7 @@ class VendorQueryService:
             certification_count=ct_count,
             tenant=overlays.get(v.id),
             description=v.description,
+            parent_company=v.parent_company,
             domains=[d.domain for d in v.domains],
             aliases=[a.alias for a in v.aliases],
             industries=[ref(i) for i in industries],
@@ -341,6 +342,7 @@ class VendorQueryService:
                     standards=e.standards,
                     specs=e.specs,
                     applications=e.applications,
+                    attributes=e.attributes or {},
                 )
                 for e, c in equipment
             ],

@@ -144,5 +144,34 @@ def run_worker() -> None:
         asyncio.run(_run_worker())
 
 
+async def _extract_attributes() -> tuple[int, int]:
+    from sqlalchemy import select
+
+    from app.modules.equipment.extract import extract_spec_attributes
+    from app.modules.vendors.models import VendorEquipment
+
+    engine = build_engine(get_settings(), null_pool=True)
+    changed = total = 0
+    try:
+        async with open_session(build_sessionmaker(engine), TenantContext.platform()) as s:
+            for row in await s.scalars(select(VendorEquipment)):
+                total += 1
+                attrs = extract_spec_attributes(row.specs)
+                if attrs != (row.attributes or {}):
+                    row.attributes = attrs
+                    changed += 1
+            await s.commit()
+    finally:
+        await engine.dispose()
+    return changed, total
+
+
+@cli.command("extract-attributes")
+def extract_attributes() -> None:
+    """Re-read every catalogue product's specs into structured attributes (capacity, head, pressure...)."""
+    changed, total = asyncio.run(_extract_attributes())
+    typer.echo(f"Structured attributes updated on {changed} of {total} products.")
+
+
 if __name__ == "__main__":
     cli()

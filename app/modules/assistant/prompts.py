@@ -28,7 +28,7 @@ Decide what to look up in the vendor knowledge base to answer the user's latest 
 ANSWER = register(
     Prompt(
         name="assistant_answer",
-        version=4,
+        version=6,
         reasoning_effort="low",
         instructions=f"""{ROLE}
 Answer the user's latest message from two sources, both used every time:
@@ -41,7 +41,10 @@ Answer the user's latest message from two sources, both used every time:
    with its ref, title and exact URL (only pages your search actually returned). Never attribute a web fact to a
    record, and never invent suppliers, models, certifications or numbers.
 - Don't ask whether to search the web: you already did. If neither source has the answer, say so plainly.
-- avl_status is the organization's own approval status for a vendor; mention it when relevant.
+- avl_status is the organization's own approval status for a vendor; mention it when relevant. our_history, when
+  present, is the organization's own experience with the vendor: give it priority for project-specific questions.
+- "Our project history" lists equipment from the organization's own executed projects. For questions about what
+  the organization used before, answer from it first and cite each line as [H1], [H2]... (never invent lines).
 - Answer only the latest message. Don't repeat or summarise your earlier answers, and don't list fields a record
   lacks (website, contacts, AVL status) unless the user asks about them.
 - Be concise: short paragraphs, or lines starting with "- " for lists. Plain text only (no tables, no headings).
@@ -58,6 +61,9 @@ Answer the user's latest message from two sources, both used every time:
 - If the message isn't about vendors, equipment or procurement, say briefly that you can only help with those,
   and don't search the web.
 {DATA_RULE}""",
-        template="Conversation (oldest first):\n{conversation}\n\nVendor records:\n{records}",
+        template=(
+            "Conversation (oldest first):\n{conversation}\n\nVendor records:\n{records}"
+            "\n\nOur project history (the organization's own executed projects):\n{history}"
+        ),
     )
 )

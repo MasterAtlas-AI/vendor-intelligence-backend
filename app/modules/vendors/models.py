@@ -54,6 +54,7 @@ class Vendor(Entity, Base):
     website: Mapped[str | None] = mapped_column(String(500))
     hq_country: Mapped[str | None] = mapped_column(CHAR(2))
     hq_city: Mapped[str | None] = mapped_column(String(120))
+    parent_company: Mapped[str | None] = mapped_column(String(300))  # SOW 5.1: the group it belongs to
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[VendorStatus] = mapped_column(
         pg_enum(VendorStatus, "vendor_status"), default=VendorStatus.ACTIVE
@@ -128,7 +129,7 @@ class VendorContact(Entity, Base):
     vendor_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("vendors.id", ondelete="CASCADE"), index=True)
     contact_type: Mapped[str] = mapped_column(
         String(20)
-    )  # general, sales, service, support, procurement, other
+    )  # general, sales, service, support, procurement, agent (authorized agent / representative), other
     label: Mapped[str] = mapped_column(String(120), default="")  # e.g. "Singapore office", "Spare parts"
     email: Mapped[str | None] = mapped_column(String(254))
     phone: Mapped[str | None] = mapped_column(String(40))
@@ -158,6 +159,9 @@ class VendorEquipment(Entity, Base):
     standards: Mapped[list[str]] = mapped_column(ARRAY(String(80)), default=list)
     specs: Mapped[dict[str, Any]] = mapped_column(default=dict)
     applications: Mapped[list[str]] = mapped_column(ARRAY(String(120)), default=list)
+    # Structured values read from `specs` (attribute key -> [min, max] in the attribute's unit). Extracted by rules,
+    # not verified: shown as "Extracted from specs, pending verification".
+    attributes: Mapped[dict[str, Any]] = mapped_column(default=dict)
     status: Mapped[FactStatus] = mapped_column(fact_status, default=FactStatus.APPROVED)
 
 

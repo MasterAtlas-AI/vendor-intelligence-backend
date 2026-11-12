@@ -28,6 +28,7 @@ class CurrentUser(BaseModel):
     platform_roles: list[str]
     permissions: list[str]
     impersonating: bool = False
+    department: str | None = None  # picks the dashboard's department view
 
 
 class TokenResponse(BaseModel):

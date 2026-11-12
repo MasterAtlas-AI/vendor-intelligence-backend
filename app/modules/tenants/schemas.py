@@ -2,9 +2,10 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field
 
 from app.domain.enums import TenantStatus
+from app.modules.tenants.policy import AiControls, controls_from
 
 SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$"
 
@@ -18,6 +19,12 @@ class TenantRead(BaseModel):
     plan: str
     settings: dict[str, Any]
     created_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def ai(self) -> AiControls:
+        """AI and public-source controls (also inside `settings["ai"]`), with defaults filled in."""
+        return controls_from(self.settings)
 
 
 class TenantAdminRead(TenantRead):
@@ -55,3 +62,4 @@ class TenantSelfUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=2, max_length=200)
     settings: dict[str, Any] | None = None
+    ai: AiControls | None = None  # merged into settings["ai"]

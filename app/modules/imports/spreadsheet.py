@@ -17,8 +17,10 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.exceptions import ValidationFailed
+from app.modules.imports.docx import read_docx_tables
 
 SPREADSHEET_EXTENSIONS = {".xlsx", ".xlsm", ".csv"}
+TABLE_EXTENSIONS = SPREADSHEET_EXTENSIONS | {".docx"}  # Word tables read as sheets (MEL import)
 HEADER_SCAN_ROWS = 10
 MAX_COLUMNS = 60
 MAX_CELL_CHARS = 5000
@@ -133,6 +135,17 @@ def read_spreadsheet(data: bytes, filename: str, *, max_rows: int) -> Workbook:
         book = _read_csv(data, max_rows)
     elif ext in {".xlsx", ".xlsm"}:
         book = _read_xlsx(data, max_rows)
+    elif ext == ".docx":
+        book = Workbook(
+            sheets=[
+                Sheet(
+                    name=name, rows=_grid([[_text(v) for v in r[:MAX_COLUMNS]] for r in rows]), truncated=cut
+                )
+                for name, rows, cut in read_docx_tables(data, max_rows)
+            ]
+        )
+        if not book.sheets:
+            raise ValidationFailed("The Word document has no tables to read")
     else:
         raise ValidationFailed(
             f"Unsupported file type {ext or '(none)'}; upload .xlsx or .csv "
@@ -161,7 +174,7 @@ def headers(sheet: Sheet, header_row: int) -> list[str]:
         )
     if not sheet.rows:
         return []
-    return [v or f"Column {i + 1}" for i, v in enumerate(sheet.rows[header_row - 1])]
+    return [" ".join(v.split()) or f"Column {i + 1}" for i, v in enumerate(sheet.rows[header_row - 1])]
 
 
 # ---------------------------------------------------------------- column mapping

@@ -105,7 +105,7 @@ async def pdf_import_handler(ctx: JobContext) -> dict[str, Any]:
         if upload is None:
             raise NotFound("The uploaded file no longer exists")
         taxonomy = await Taxonomy.load(s)
-        pdf, ex = await read_and_extract(upload.data, taxonomy, ctx.settings.pdf_max_pages)
+        pdf, ex = await read_and_extract(upload.data, taxonomy, ctx.settings.pdf_max_pages, upload.filename)
         await ctx.progress("extracting", 60)
 
         row = await vendor_row(s, taxonomy, vendor, pdf, ex, inp.get("include"), options)

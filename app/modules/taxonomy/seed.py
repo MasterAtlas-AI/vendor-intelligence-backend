@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.equipment.seed import sync_attributes
 from app.modules.taxonomy.models import CertificationType, EquipmentCategory, Industry, ServiceCategory
 from app.modules.taxonomy.seed_data import CERTIFICATIONS, EQUIPMENT, INDUSTRIES, SERVICES, Node
 
@@ -65,4 +66,5 @@ async def sync_taxonomy(session: AsyncSession) -> dict[str, int]:
     counts["industries"] = len(INDUSTRIES)
 
     await session.flush()
+    counts["equipment_attributes"] = await sync_attributes(session)
     return counts

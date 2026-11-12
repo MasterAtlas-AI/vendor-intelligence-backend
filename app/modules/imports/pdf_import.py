@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFound
 from app.domain.enums import ProposalItemAction, SourceKind, VendorStatus
 from app.modules.imports.importer import ImportOptions, ParsedRow, Taxonomy, _fact_key, parse_row
-from app.modules.imports.pdf_extract import Extraction, Hit, PdfText, PhraseIndex, extract, read_pdf
+from app.modules.imports.pdf_extract import Extraction, Hit, PdfText, PhraseIndex, extract, read_document
 from app.modules.imports.schemas import PdfCandidate, PdfInfo, PdfVendor
 from app.modules.vendors.models import Vendor
 
@@ -35,9 +35,11 @@ def candidate_key(hit: Hit) -> str:
     return f"{hit.kind}:{hit.code}"
 
 
-async def read_and_extract(data: bytes, taxonomy: Taxonomy, max_pages: int) -> tuple[PdfText, Extraction]:
+async def read_and_extract(
+    data: bytes, taxonomy: Taxonomy, max_pages: int, filename: str = "document.pdf"
+) -> tuple[PdfText, Extraction]:
     def work() -> tuple[PdfText, Extraction]:
-        pdf = read_pdf(data, max_pages=max_pages)
+        pdf = read_document(data, filename, max_pages=max_pages)
         return pdf, extract(pdf, PhraseIndex(taxonomy.labels))
 
     return await anyio.to_thread.run_sync(work)

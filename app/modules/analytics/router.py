@@ -70,6 +70,37 @@ class PlatformAnalytics(BaseModel):
     organizations: list[OrganizationUsage]
 
 
+class LongLeadItem(BaseModel):
+    category: str
+    vendor: str
+    weeks: int
+    project: str
+
+
+class VendorPerformance(BaseModel):
+    vendor: str
+    orders: int
+    avg_lead_weeks: float | None
+    on_time_rate: float | None  # 0-1
+    avg_rating: float | None  # 1-5
+
+
+class HistoryAnalytics(BaseModel):
+    """The organization's own project history (SOW 23): equipment across projects, vendors, lead times."""
+
+    equipment: int
+    historical_projects: int
+    purchase_orders: int
+    notes: int
+    added_recently: int  # equipment lines added in the period
+    awaiting_review: int  # MEL rows not yet approved or rejected
+    equipment_by_category: list[Bar]
+    most_used_vendors: list[Bar]  # by number of projects
+    equipment_by_year: list[Bar]  # technology / volume trend by project year
+    long_lead: list[LongLeadItem]
+    vendor_performance: list[VendorPerformance]
+
+
 class OrganizationAnalytics(BaseModel):
     days: int
     vendors: int
@@ -83,6 +114,7 @@ class OrganizationAnalytics(BaseModel):
     ai_budget_month: float
     active_projects: int
     reports: int
+    history: HistoryAnalytics
 
 
 @router.get("/admin/analytics", response_model=PlatformAnalytics)

@@ -31,6 +31,7 @@ from app.core.exceptions import NotFound
 from app.core.logging import get_logger
 from app.domain.enums import FactStatus, VendorStatus
 from app.domain.principal import Principal
+from app.modules.equipment.models import ProcurementRecord, ProjectEquipment
 from app.modules.imports.importer import Taxonomy
 from app.modules.search.intent import RERANK, parse_ai, parse_local
 from app.modules.search.intent import clean as clean_intent
@@ -377,7 +378,17 @@ class SearchService:
         )
         text = intent.keywords or ("" if intent.structured else req.query)
         semantic_text = req.query.strip() or self._describe(intent, tax)
-        hard = bool(filters.countries or filters.avl_status or filters.my_vendors_only)
+        hard = bool(
+            filters.countries
+            or filters.avl_status
+            or filters.my_vendors_only
+            or filters.standards
+            or filters.certifications
+            or filters.equipment_category
+            or filters.used_by_us
+            or filters.used_on_projects
+            or filters.technically_accepted_by_us
+        )
         limit = CANDIDATES * (4 if hard else 1)
 
         structured = await self._structured(intent, limit)
@@ -527,6 +538,62 @@ class SearchService:
             stmt = stmt.join(TenantVendorLink, link)
             if filters.avl_status:
                 stmt = stmt.where(TenantVendorLink.avl_status.in_(filters.avl_status))
+        for std in filters.standards:
+            pattern = f"%{std.replace(' ', '%')}%"
+            products = select(VendorEquipment.vendor_id).where(
+                VendorEquipment.status == FactStatus.APPROVED,
+                func.array_to_string(VendorEquipment.standards, " ").ilike(pattern),
+            )
+            certified = (
+                select(VendorCertification.vendor_id)
+                .join(CertificationType, CertificationType.id == VendorCertification.certification_type_id)
+                .where(
+                    VendorCertification.status == FactStatus.APPROVED, CertificationType.name.ilike(pattern)
+                )
+            )
+            stmt = stmt.where(or_(Vendor.id.in_(products), Vendor.id.in_(certified)))
+        if filters.certifications:
+            stmt = stmt.where(
+                Vendor.id.in_(
+                    select(VendorCertification.vendor_id)
+                    .join(
+                        CertificationType, CertificationType.id == VendorCertification.certification_type_id
+                    )
+                    .where(
+                        VendorCertification.status == FactStatus.APPROVED,
+                        CertificationType.code.in_(filters.certifications),
+                    )
+                )
+            )
+        if filters.equipment_category:
+            code = filters.equipment_category
+            stmt = stmt.where(
+                Vendor.id.in_(
+                    select(VendorEquipment.vendor_id)
+                    .join(EquipmentCategory, EquipmentCategory.id == VendorEquipment.category_id)
+                    .where(
+                        VendorEquipment.status == FactStatus.APPROVED,
+                        or_(EquipmentCategory.code == code, EquipmentCategory.code.like(f"{code}.%")),
+                    )
+                )
+            )
+        if (filters.used_by_us or filters.used_on_projects) and self.principal.tenant_id is not None:
+            used = select(ProjectEquipment.vendor_id).where(ProjectEquipment.verification != "archived")
+            makers = select(ProjectEquipment.manufacturer_id).where(
+                ProjectEquipment.verification != "archived"
+            )
+            if filters.used_on_projects:
+                used = used.where(ProjectEquipment.project_id.in_(filters.used_on_projects))
+                makers = makers.where(ProjectEquipment.project_id.in_(filters.used_on_projects))
+            stmt = stmt.where(or_(Vendor.id.in_(used), Vendor.id.in_(makers)))
+        if filters.technically_accepted_by_us and self.principal.tenant_id is not None:
+            stmt = stmt.where(
+                Vendor.id.in_(
+                    select(ProcurementRecord.vendor_id).where(
+                        ProcurementRecord.technical_status.in_(("accepted", "conditional"))
+                    )
+                )
+            )
         return list(await self.s.scalars(stmt))
 
     async def _summaries(self, ids: list[uuid.UUID]) -> dict[uuid.UUID, Any]:

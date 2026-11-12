@@ -12,9 +12,10 @@ import uuid
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.exceptions import Conflict, Forbidden, NotFound, ValidationFailed, VersionConflict
 from app.domain.enums import UserStatus
@@ -110,7 +111,9 @@ class ProjectService:
         if project is None:
             raise NotFound("Project not found")
         role = await self._role(project_id)
-        if not self.manager and role is None:
+        # Historical projects are organization knowledge: anyone who may read project history can open them.
+        readable = project.kind == "historical" and self.principal.has(P.EQUIPMENT_READ)
+        if not self.manager and role is None and not readable:
             raise NotFound("Project not found")
         if owner and not (self.manager or role == "owner"):
             raise Forbidden("Only the project's owners can manage its members")
@@ -140,9 +143,11 @@ class ProjectService:
     async def list_projects(self, status: str | None) -> list[TenantProjectRead]:
         stmt = select(Project)
         if not self.manager:
-            stmt = stmt.join(ProjectMember, ProjectMember.project_id == Project.id).where(
-                ProjectMember.user_id == self.principal.user_id
-            )
+            member = select(ProjectMember.project_id).where(ProjectMember.user_id == self.principal.user_id)
+            visible: ColumnElement[bool] = Project.id.in_(member)
+            if self.principal.has(P.EQUIPMENT_READ):
+                visible = or_(visible, Project.kind == "historical")
+            stmt = stmt.where(visible)
         stmt = stmt.where(Project.status == status) if status else stmt.where(Project.status != "archived")
         projects = list(await self.s.scalars(stmt.order_by(Project.updated_at.desc()).limit(200)))
         return [await self._read(p) for p in projects]

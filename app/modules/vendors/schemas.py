@@ -47,6 +47,8 @@ class EquipmentRead(BaseModel):
     standards: list[str]
     specs: dict[str, Any]
     applications: list[str]
+    # Read from `specs` by rules (attribute key -> [min, max]); shown as extracted, pending verification.
+    attributes: dict[str, Any] = {}
 
 
 class ServiceRead(BaseModel):
@@ -109,6 +111,7 @@ class SourceRead(BaseModel):
 
 class VendorDetail(VendorSummary):
     description: str
+    parent_company: str | None = None
     domains: list[str]
     aliases: list[str]
     industries: list[CategoryRef]
