@@ -394,7 +394,15 @@ class EquipmentService:
         records = history.all()
         for row in records:
             e, project, code, cat_name, vendor = row
-            m = self._compare(req, e.attributes, e.standards, category_score(code), defs, e.service or e.name)
+            m = self._compare(
+                req,
+                e.attributes,
+                e.standards,
+                category_score(code),
+                defs,
+                e.service or e.name,
+                project.location if project is not None else None,
+            )
             if m is None:
                 continue
             score, exact, diffs = m
@@ -461,6 +469,7 @@ class EquipmentService:
         cat: float,
         defs: dict[str, Any],
         service: str = "",
+        location: str | None = None,
     ) -> tuple[float, bool, list[AttributeDiff]] | None:
         if req.category_code and cat == 0:
             return None
@@ -495,6 +504,16 @@ class EquipmentService:
             parts.append((0.15, hit))
         if req.service.strip():  # SOW 13.1: the same duty ("seawater", "crude", "produced water")
             parts.append((0.15, _service_overlap(req.service, service)))
+        if req.material.strip():  # SOW 13.2: "Duplex" ~ "DSS 22Cr Duplex"; "SS316" ~ "SS 316L"
+            parts.append((0.1, _text_overlap(req.material, str(attrs.get("material") or ""))))
+        if req.package_configuration.strip():
+            parts.append(
+                (0.1, _text_overlap(req.package_configuration, str(attrs.get("package_configuration") or "")))
+            )
+        if (
+            req.location
+        ):  # offshore duty: equipment proven offshore scores higher (catalogue products: unknown)
+            parts.append((0.1, 1.0 if location == req.location else 0.5 if location is None else 0.0))
         score = round(sum(w * v for w, v in parts) / sum(w for w, _ in parts), 3)
         if score < 0.3:
             return None
@@ -918,6 +937,41 @@ class EquipmentService:
             fields=field_labels(defs),
         )
 
+    async def _refresh_line(
+        self,
+        e: ProjectEquipment,
+        p: dict[str, Any],
+        r: MelRow,
+        vendor_id: uuid.UUID | None,
+        maker_id: uuid.UUID | None,
+    ) -> None:
+        """A re-imported MEL row (SOW 8.9): the newer revision's values replace the line's, nothing is lost that the
+        new row leaves blank, and the line points at the new source."""
+        before = {"source_ref": e.source_ref, "version": e.version}
+        if p.get("category_code"):
+            e.category_id = await self._category_id(p["category_code"])
+        for field in ("name", "service", "model", "tag"):
+            if p.get(field):
+                setattr(e, field, p[field])
+        if p.get("vendor_name"):
+            e.vendor_id, e.vendor_name = vendor_id, p["vendor_name"]
+        if p.get("manufacturer_name"):
+            e.manufacturer_id, e.manufacturer_name = maker_id, p["manufacturer_name"]
+        e.quantity = p.get("quantity") or e.quantity
+        e.attributes = {**(e.attributes or {}), **(p.get("attributes") or {})}
+        e.standards = list(dict.fromkeys([*(p.get("standards") or []), *e.standards]))[:20]
+        e.specs_text = p.get("specs_text") or e.specs_text
+        e.source_upload_id, e.source_ref = r.upload_id, (p.get("source_ref") or "")[:200]
+        e.version += 1
+        record_audit(
+            self.s,
+            "equipment.updated_from_mel",
+            principal=self.principal,
+            entity_type="project_equipment",
+            entity_id=e.id,
+            changes={"before": before, "source_ref": e.source_ref},
+        )
+
     async def mel_uploads(self, project_id: uuid.UUID) -> list[MelUploadSummary]:
         """A project's MELs, newest first, so a review can be picked up from any browser."""
         self._need(P.EQUIPMENT_READ)
@@ -1069,6 +1123,16 @@ class EquipmentService:
                 continue
             vendor_id = uuid.UUID(p["vendor_id"]) if p.get("vendor_id") else None
             maker_id = uuid.UUID(p["manufacturer_id"]) if p.get("manufacturer_id") else None
+            existing = (
+                await self.s.get(ProjectEquipment, uuid.UUID(p["duplicate_of"]))
+                if p.get("duplicate_of")
+                else None
+            )
+            if existing is not None and existing.project_id == r.project_id:
+                await self._refresh_line(existing, p, r, vendor_id, maker_id)
+                r.status, r.equipment_id = "approved", existing.id
+                result.updated += 1
+                continue
             e = ProjectEquipment(
                 tenant_id=self.tenant_id,
                 project_id=r.project_id,
@@ -1227,6 +1291,34 @@ def _service_overlap(wanted: str, have: str) -> float:
         text = re.sub(r"fresh\s*water|\bf\.?w\b", "freshwater", text)
         flat = re.sub(r"[^a-z0-9]+", " ", text)
         return {w.rstrip("s") for w in flat.split() if len(w) > 2 and w not in _SERVICE_STOP}
+
+    want = words(wanted)
+    if not want:
+        return 1.0
+    return len(want & words(have)) / len(want)
+
+
+_MATERIALS = (
+    (r"\bduplex\b|\bdss\b|22\s*cr", "duplex"),
+    (r"super\s*duplex|\bsdss\b|25\s*cr", "superduplex"),
+    (r"\b(?:ss|aisi)?\s*316l?\b|stainless", "ss316"),
+    (r"\bltcs\b|low\s*temp\w*\s*carbon", "ltcs"),
+    (r"\bcs\b|carbon\s*steel", "cs"),
+    (r"titanium|\bti\b", "titanium"),
+    (r"inconel|alloy\s*625|alloy\s*825|nickel", "nickel"),
+    (r"bronze|nab|aluminium\s*bronze", "bronze"),
+    (r"\bgrp\b|\bfrp\b|glass\s*reinforced", "grp"),
+)
+
+
+def _text_overlap(wanted: str, have: str) -> float:
+    """Share of the requested words (and material families: "DSS 22Cr" = duplex) found in the line's text."""
+
+    def words(text: str) -> set[str]:
+        low = text.lower()
+        families = {tag for pattern, tag in _MATERIALS if re.search(pattern, low)}
+        flat = re.sub(r"[^a-z0-9]+", " ", low)
+        return {w for w in flat.split() if len(w) > 2} | families
 
     want = words(wanted)
     if not want:

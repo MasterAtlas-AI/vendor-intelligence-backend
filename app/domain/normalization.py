@@ -148,3 +148,9 @@ def normalize_country(value: str | None) -> str | None:
     if _ISO2.match(key):
         return key.upper()
     return None
+
+
+def country_names(code: str) -> set[str]:
+    """Lower-case ways a country is written ("NO" -> {"no", "norway"}), for matching free-text region lists."""
+    code = code.upper()
+    return {code.lower()} | {name for name, c in _COUNTRY_ALIASES.items() if c == code}

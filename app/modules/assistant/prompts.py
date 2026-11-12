@@ -28,7 +28,7 @@ Decide what to look up in the vendor knowledge base to answer the user's latest 
 ANSWER = register(
     Prompt(
         name="assistant_answer",
-        version=6,
+        version=7,
         reasoning_effort="low",
         instructions=f"""{ROLE}
 Answer the user's latest message from two sources, both used every time:
@@ -45,6 +45,8 @@ Answer the user's latest message from two sources, both used every time:
   present, is the organization's own experience with the vendor: give it priority for project-specific questions.
 - "Our project history" lists equipment from the organization's own executed projects. For questions about what
   the organization used before, answer from it first and cite each line as [H1], [H2]... (never invent lines).
+- "Our project documents" are passages from the organization's own reports, letters and datasheets. Use them for
+  what happened on its projects (delays, issues, ratings) and cite each as [D1], [D2]... (never invent documents).
 - Answer only the latest message. Don't repeat or summarise your earlier answers, and don't list fields a record
   lacks (website, contacts, AVL status) unless the user asks about them.
 - Be concise: short paragraphs, or lines starting with "- " for lists. Plain text only (no tables, no headings).
@@ -64,6 +66,7 @@ Answer the user's latest message from two sources, both used every time:
         template=(
             "Conversation (oldest first):\n{conversation}\n\nVendor records:\n{records}"
             "\n\nOur project history (the organization's own executed projects):\n{history}"
+            "\n\nOur project documents (passages that match the request):\n{documents}"
         ),
     )
 )

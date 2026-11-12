@@ -121,7 +121,13 @@ async def rescore(s: AsyncSession, vendor_ids: list[uuid.UUID] | None = None) ->
 
 
 async def dashboard(
-    s: AsyncSession, *, issue: str | None, limit: int, hide_checked: bool = False, q: str | None = None
+    s: AsyncSession,
+    *,
+    issue: str | None,
+    limit: int,
+    hide_checked: bool = False,
+    q: str | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {"stale_days": STALE_DAYS}
     base = _FACTS.format(where="")
@@ -164,14 +170,18 @@ async def dashboard(
                 text(
                     base  # `where` comes from the fixed _ISSUE_SQL table
                     + f"SELECT f.id, v.display_name, v.hq_country, {_SCORE} AS score, {issue_cols} "
-                    f"FROM f JOIN vendors v ON v.id = f.id {where} ORDER BY score, v.display_name LIMIT :limit"
+                    f"FROM f JOIN vendors v ON v.id = f.id {where} ORDER BY score, v.display_name LIMIT :limit OFFSET :offset"
                 ),
-                {**params, "limit": limit},
+                {**params, "limit": limit, "offset": offset},
             )
         )
         .mappings()
         .all()
     )
+    # How many vendors this list has in all (for page numbers).
+    matching = (
+        await s.execute(text(base + f"SELECT count(*) FROM f JOIN vendors v ON v.id = f.id {where}"), params)
+    ).scalar_one()
     checks: dict[uuid.UUID, list[dict[str, Any]]] = {}
     if rows:
         found = await s.execute(
@@ -190,6 +200,7 @@ async def dashboard(
         "avg_score": float(totals["avg_score"] or 0),
         "distribution": {"low": totals["low"], "medium": totals["medium"], "high": totals["high"]},
         "issues": [{"key": k, "label": ISSUES[k], "count": totals[k]} for k in ISSUES],
+        "worst_total": int(matching),
         "worst": [
             QualityRow(
                 r["id"],

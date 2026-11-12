@@ -107,11 +107,13 @@ class SourceRead(BaseModel):
     url: str | None
     title: str
     retrieved_at: datetime | None
+    reliability: Decimal | None = None  # set by curators for the source's domain (Admin > Data sources)
 
 
 class VendorDetail(VendorSummary):
     description: str
     parent_company: str | None = None
+    manufacturing_capability: str = ""
     domains: list[str]
     aliases: list[str]
     industries: list[CategoryRef]
@@ -127,10 +129,22 @@ class VendorDetail(VendorSummary):
     sources: list[SourceRead]
 
 
+class VendorDocument(BaseModel):
+    """A document your organization uploaded that facts on this vendor came from (SOW 17.3). Private to you."""
+
+    upload_id: uuid.UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    uploaded_at: datetime
+    facts: int  # proposed facts from it about this vendor
+
+
 class VendorPage(BaseModel):
     items: list[VendorSummary]
     next_cursor: str | None
     has_more: bool
+    total: int | None = None  # with `offset` (numbered pages): how many vendors match in all
 
 
 class TenantOverlayUpdate(BaseModel):

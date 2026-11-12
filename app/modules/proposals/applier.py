@@ -200,7 +200,13 @@ class Applier:
 
     async def _update_field(self, vendor: Vendor, p: dict[str, Any]) -> Applied:
         field, value = p["field"], p.get("value")
-        setattr(vendor, field, value if value is not None else ("" if field == "description" else None))
+        setattr(
+            vendor,
+            field,
+            value
+            if value is not None
+            else ("" if field in ("description", "manufacturing_capability") else None),
+        )
         if field == "legal_name":
             vendor.normalized_name = normalize_name(value or "")
         if field == "website" and value and not p.get("shared_domain"):

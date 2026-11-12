@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import ColumnElement, Select, and_, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.exceptions import Forbidden, NotFound, ValidationFailed
 from app.domain.enums import AvlStatus, FactStatus, VendorStatus
@@ -41,6 +42,7 @@ from app.modules.vendors.schemas import (
     TenantOverlayRead,
     TenantOverlayUpdate,
     VendorDetail,
+    VendorDocument,
     VendorSummary,
 )
 
@@ -202,15 +204,19 @@ class VendorQueryService:
         return stmt
 
     async def search(
-        self, f: VendorFilters, *, limit: int, cursor: str | None
+        self, f: VendorFilters, *, limit: int, cursor: str | None, offset: int | None = None
     ) -> tuple[list[VendorSummary], str | None]:
+        """A page of vendors by name: after `cursor` (keyset, for endless lists), or at `offset` (numbered pages)."""
         limit = max(1, min(limit, MAX_LIMIT))
         sort_key = func.lower(Vendor.display_name)
         stmt = self._filtered(f)
         if cursor:
             name, last_id = _decode_cursor(cursor)
             stmt = stmt.where(tuple_(sort_key, Vendor.id) > tuple_(name, last_id))
-        rows = (await self.s.execute(stmt.order_by(sort_key, Vendor.id).limit(limit + 1))).all()
+        ordered = stmt.order_by(sort_key, Vendor.id).limit(limit + 1)
+        if offset and not cursor:
+            ordered = ordered.offset(offset)
+        rows = (await self.s.execute(ordered)).all()
         has_more = len(rows) > limit
         rows = rows[:limit]
         overlays = await self._overlays([r[0].id for r in rows])
@@ -232,6 +238,10 @@ class VendorQueryService:
         ]
         nxt = _encode_cursor(rows[-1][0].display_name.lower(), rows[-1][0].id) if has_more else None
         return items, nxt
+
+    async def count(self, f: VendorFilters) -> int:
+        """How many vendors match the filters (numbered pages)."""
+        return int(await self.s.scalar(select(func.count()).select_from(self._filtered(f).subquery())) or 0)
 
     async def _overlays(self, vendor_ids: list[uuid.UUID]) -> dict[uuid.UUID, TenantOverlayRead]:
         if not vendor_ids or self.principal.tenant_id is None:
@@ -325,6 +335,7 @@ class VendorQueryService:
             tenant=overlays.get(v.id),
             description=v.description,
             parent_company=v.parent_company,
+            manufacturing_capability=v.manufacturing_capability,
             domains=[d.domain for d in v.domains],
             aliases=[a.alias for a in v.aliases],
             industries=[ref(i) for i in industries],
@@ -435,3 +446,60 @@ class VendorQueryService:
             entity_id=vendor_id,
         )
         await self.s.commit()
+
+
+async def vendor_documents(
+    s: AsyncSession, principal: Principal, vendor_id: uuid.UUID
+) -> list[VendorDocument]:
+    """Documents this organization uploaded whose import proposed facts about the vendor (SOW 17.3). Uploads are
+    tenant-private (row-level security), so another organization's documents never show."""
+    from app.modules.imports.models import Upload
+    from app.modules.jobs.models import Job
+    from app.modules.proposals.models import KnowledgeProposal, ProposalItem
+
+    if principal.tenant_id is None:
+        return []
+    # A new-vendor proposal has no subject until applied: its create_vendor item then points at the vendor.
+    created = aliased(ProposalItem)
+    about_vendor = or_(
+        KnowledgeProposal.subject_vendor_id == vendor_id,
+        exists(
+            select(1)
+            .select_from(created)
+            .where(
+                created.proposal_id == KnowledgeProposal.id,
+                created.applied_table == "vendors",
+                created.applied_entity_id == vendor_id,
+            )
+            .correlate(KnowledgeProposal)
+        ),
+    )
+    upload_key = Job.input["upload_id"].astext.label("upload_key")
+    rows = (
+        await s.execute(
+            select(upload_key, func.count(ProposalItem.id))
+            .join(KnowledgeProposal, KnowledgeProposal.origin_job_id == Job.id)
+            .join(ProposalItem, ProposalItem.proposal_id == KnowledgeProposal.id)
+            .where(KnowledgeProposal.origin_tenant_id == principal.tenant_id, about_vendor)
+            .group_by(upload_key)  # by label: the key as a bind parameter twice would not match
+        )
+    ).all()
+    facts = {uuid.UUID(u): int(n) for u, n in rows if u}
+    if not facts:
+        return []
+    uploads = await s.scalars(
+        select(Upload)
+        .where(Upload.id.in_(list(facts)), Upload.tenant_id == principal.tenant_id)
+        .order_by(Upload.created_at.desc())
+    )
+    return [
+        VendorDocument(
+            upload_id=u.id,
+            filename=u.filename,
+            content_type=u.content_type,
+            size_bytes=u.size_bytes,
+            uploaded_at=u.created_at,
+            facts=facts[u.id],
+        )
+        for u in uploads
+    ]

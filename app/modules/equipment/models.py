@@ -19,12 +19,13 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     SmallInteger,
     String,
     Text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, deferred, mapped_column
 
 from app.db.base import Base
 from app.db.mixins import Entity, TenantScoped
@@ -61,8 +62,10 @@ EQUIPMENT_STATUSES = (
     "standby",
     "decommissioned",
 )
-PROCUREMENT_STATUSES = ("ordered", "manufacturing", "shipped", "delivered", "cancelled")
-RECORD_TYPES = ("po", "quotation")
+# raised / approved: a requisition's stages before an order exists (SOW 3.6, 3.7)
+PROCUREMENT_STATUSES = ("raised", "approved", "ordered", "manufacturing", "shipped", "delivered", "cancelled")
+# pr: purchase requisition, mr: material requisition (SOW 3.6, 3.7); po; quotation (with its TBE result)
+RECORD_TYPES = ("pr", "mr", "po", "quotation")
 TECHNICAL_STATUSES = ("accepted", "conditional", "rejected")  # technical bid evaluation result
 MEL_ROW_STATUSES = ("pending", "approved", "rejected")
 ATTRIBUTE_TYPES = ("number", "text")
@@ -150,7 +153,7 @@ class ProcurementRecord(Entity, TenantScoped, Base):
     )
     vendor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vendors.id", ondelete="SET NULL"))
     vendor_name: Mapped[str] = mapped_column(String(300), default="")
-    record_type: Mapped[str] = mapped_column(String(12), default="po")  # po | quotation
+    record_type: Mapped[str] = mapped_column(String(12), default="po")  # RECORD_TYPES
     technical_status: Mapped[str | None] = mapped_column(
         String(12)
     )  # TBE result: accepted | conditional | rejected
@@ -259,3 +262,48 @@ class SavedSearch(Entity, Base):
     name: Mapped[str] = mapped_column(String(120))
     query: Mapped[str] = mapped_column(String(500), default="")
     filters: Mapped[dict[str, Any]] = mapped_column(default=dict)
+
+
+# SOW 3.13 / 3.14 / 3.17 / 14.6: a project's documents beside its equipment history.
+DOCUMENT_TYPES = (
+    "drawing",
+    "datasheet",
+    "specification",
+    "correspondence",
+    "schedule",
+    "report",
+    "certificate",
+    "other",
+)
+
+
+class ProjectDocument(Entity, TenantScoped, Base):
+    """A project document (vendor drawing, letter, schedule, datasheet...): numbered, revised, optionally tied to an
+    equipment line and a vendor, with the file itself. Tenant-private like the rest of project history."""
+
+    __tablename__ = "project_documents"
+    __table_args__ = (
+        CheckConstraint(_in("doc_type", DOCUMENT_TYPES), name="doc_type"),
+        Index("ix_project_documents_tenant_project", "tenant_id", "project_id"),
+        Index("ix_project_documents_equipment", "equipment_id"),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant_projects.id", ondelete="CASCADE"))
+    equipment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_equipment.id", ondelete="SET NULL")
+    )
+    vendor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("vendors.id", ondelete="SET NULL"))
+    doc_type: Mapped[str] = mapped_column(String(20))
+    doc_number: Mapped[str] = mapped_column(String(120), default="")  # e.g. 20171-SPOG-62400-MA-DW-0002
+    title: Mapped[str] = mapped_column(String(300))
+    revision: Mapped[str] = mapped_column(String(20), default="")
+    doc_date: Mapped[date | None] = mapped_column(Date)
+    department: Mapped[str | None] = mapped_column(String(30))
+    notes: Mapped[str] = mapped_column(Text, default="")
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    content_type: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    data: Mapped[bytes | None] = deferred(mapped_column(LargeBinary))
+    # Words read from the file on the server (SOW H.4 / 25.4); None until read, '' when the file has none.
+    text_content: Mapped[str | None] = deferred(mapped_column(Text))
+    text_chars: Mapped[int] = mapped_column(Integer, default=-1, server_default="-1")  # -1: not read yet

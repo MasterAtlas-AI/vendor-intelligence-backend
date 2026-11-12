@@ -53,7 +53,8 @@ class QualityDashboard(BaseModel):
     avg_score: float
     distribution: dict[str, int]  # low (<0.4) / medium / high (>=0.7)
     issues: list[IssueCount]
-    worst: list[QualityVendor]
+    worst: list[QualityVendor]  # one page of the list (limit / offset)
+    worst_total: int = 0  # vendors in the whole list, for page numbers
 
 
 class RescoreResult(BaseModel):
@@ -80,14 +81,16 @@ async def get_dashboard(
         bool, Query(description="Leave out vendors the AI already checked for this list")
     ] = False,
     q: Annotated[str | None, Query(max_length=100, description="Vendor name, legal name or alias")] = None,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
 ) -> QualityDashboard:
     """Knowledge-base quality: score distribution, how many vendors have each issue, and the weakest vendors."""
     async with open_session(c.sessionmaker, TenantContext.platform()) as s:
-        data = await dashboard(s, issue=issue, limit=limit, hide_checked=hide_checked, q=q)
+        data = await dashboard(s, issue=issue, limit=limit, hide_checked=hide_checked, q=q, offset=offset)
     return QualityDashboard(
         vendors=data["vendors"], avg_score=data["avg_score"], distribution=data["distribution"],
         issues=[IssueCount(**i) for i in data["issues"]],
         worst=[QualityVendor(**vars(r)) for r in data["worst"]],
+        worst_total=data["worst_total"],
     )  # fmt: skip
 
 

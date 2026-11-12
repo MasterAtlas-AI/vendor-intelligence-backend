@@ -127,7 +127,7 @@ async def test_mel_import_review_search_and_privacy(
     decided = await client.post(f"{API}/mel/rows/decide", headers=admin.headers, json={
         "row_ids": [r["id"] for r in rows["rows"]], "decision": "approve",
     })  # fmt: skip
-    assert decided.json() == {"approved": 3, "rejected": 0, "skipped": 0, "vendors_linked": 1}
+    assert decided.json() == {"approved": 3, "rejected": 0, "skipped": 0, "vendors_linked": 1, "updated": 0}
 
     # Search with filters: category, project year, location, attribute range.
     search = await client.post(f"{API}/equipment/search", headers=viewer.headers, json={
@@ -212,6 +212,44 @@ async def test_mel_import_review_search_and_privacy(
     })  # fmt: skip
     assert sea.json()["matches"][0]["score"] > crude.json()["matches"][0]["score"]
 
+    # SOW 8.9: importing the same MEL again flags every line as already recorded; approving updates, never copies.
+    again = await client.post(f"{API}/projects/{pid}/mel", headers=admin.headers,
+                              files={"file": ("mel-rev-b.csv", mel, "text/csv")})  # fmt: skip
+    re_id = again.json()["upload_id"]
+    await client.post(f"{API}/mel/{re_id}/parse", headers=admin.headers, json={"project_id": pid})
+    await _drain(container)
+    re_rows = (await client.get(f"{API}/mel/{re_id}/rows", headers=admin.headers)).json()["rows"]
+    assert all(r["parsed"].get("duplicate_of") for r in re_rows) and len(re_rows) == 3
+    assert all(any("Already recorded" in i for i in r["issues"]) for r in re_rows)
+    before = (await client.post(f"{API}/equipment/search", headers=viewer.headers, json={})).json()["total"]
+    redo = await client.post(f"{API}/mel/rows/decide", headers=admin.headers,
+                             json={"row_ids": [r["id"] for r in re_rows], "decision": "approve"})  # fmt: skip
+    assert redo.json()["updated"] == 3 and redo.json()["approved"] == 0, redo.text
+    after = (await client.post(f"{API}/equipment/search", headers=viewer.headers, json={})).json()
+    assert after["total"] == before
+    assert all("mel-rev-b.csv" in e["source_ref"] for e in after["items"])
+
+    # SOW 3.6 / 3.7: requisitions are procurement records too, raised before any order.
+    pr = await client.post(f"{API}/procurement-records", headers=admin.headers, json={
+        "project_id": pid, "record_type": "pr", "po_number": f"PR-{tag}", "status": "raised",
+    })  # fmt: skip
+    assert pr.status_code == 201 and pr.json()["record_type"] == "pr", pr.text
+
+    # SOW 13.2: the requested material counts (Duplex ~ "DSS 22Cr"); offshore lines suit an offshore duty.
+    async def near(material: str) -> float:
+        r = await client.post(f"{API}/equipment/similar", headers=viewer.headers, json={
+            "category_code": BB2, "attributes": {"capacity": 1200}, "material": material, "location": "offshore",
+            "include_catalogue": False,
+        })  # fmt: skip
+        return float(r.json()["matches"][0]["score"])
+
+    line_id = next(e["id"] for e in after["items"] if e["tag"] == "P-101A")
+    cur = (await client.get(f"{API}/equipment/{line_id}", headers=viewer.headers)).json()
+    await client.patch(f"{API}/equipment/{line_id}", headers=admin.headers, json={
+        "version": cur["version"], "attributes": {**cur["attributes"], "material": "DSS 22Cr"},
+    })  # fmt: skip
+    assert await near("Duplex") > await near("Titanium")
+
     # Vendor search: only vendors the organization has used.
     used = await client.post(f"{API}/search", headers=viewer.headers, json={
         "query": f"pumps {tag}", "filters": {"used_by_us": True},
@@ -288,6 +326,10 @@ async def test_assistant_respects_ai_controls(
     await client.post(f"{API}/equipment", headers=admin.headers, json={
         "project_id": pid, "name": "Booster pump", "category_code": BB2, "vendor_id": str(vid),
     })  # fmt: skip
+    report = await client.post(f"{API}/projects/{pid}/documents", headers=admin.headers, data={"doc_type": "report"},
+                               files={"file": ("lessons.txt", f"Lessons learned {tag}: the booster pump mechanical "
+                                                "seals failed after 3000 hours.".encode(), "text/plain")})  # fmt: skip
+    assert report.status_code == 201, report.text
     seen: list[str] = []
 
     def answer(text: str) -> dict[str, Any]:
@@ -312,6 +354,10 @@ async def test_assistant_respects_ai_controls(
         # The organization's own matching equipment is listed beside the answer, but not sent to the AI.
         assert [m["name"] for m in first["history_matches"]] == ["Booster pump"]
         assert "Booster pump" not in seen[0]
+        # So are its matching project documents (SOW 25.4), with the passage that matched.
+        docs = first["document_matches"]
+        assert [d["title"] for d in docs] == ["lessons.txt"] and "[[" in docs[0]["snippet"]
+        assert "3000 hours" not in seen[0]
 
         controls = await client.patch(f"{API}/tenant", headers=admin.headers, json={"ai": {
             "share_private_data": True, "web_sources": "approved_only", "approved_domains": ["https://www.api.org/x"],
@@ -321,6 +367,7 @@ async def test_assistant_respects_ai_controls(
         second = (await client.post(f"{API}/assistant/chat", headers=admin.headers, json=ask)).json()
         assert "our_history" in seen[1] and '"avl_status": "approved"' in seen[1]
         assert "Booster pump" in seen[1]  # shared once the organization allows it
+        assert "3000 hours" in seen[1] and '"ref": "D1"' in seen[1]
         assert second["web_limited_to"] == ["api.org"]
         assert [c.allowed_domains for c in fake.calls if c.schema == "AssistantAnswer"][-1] == ["api.org"]
     finally:

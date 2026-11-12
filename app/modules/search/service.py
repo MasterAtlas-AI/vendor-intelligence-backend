@@ -27,9 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.ports import AIError
 from app.ai.service import AiService, BudgetExceeded, CallContext
-from app.core.exceptions import NotFound
+from app.core.exceptions import NotFound, ValidationFailed
 from app.core.logging import get_logger
-from app.domain.enums import FactStatus, VendorStatus
+from app.domain.enums import FactStatus, LocationType, VendorStatus
+from app.domain.normalization import country_names, normalize_country
 from app.domain.principal import Principal
 from app.modules.equipment.models import ProcurementRecord, ProjectEquipment
 from app.modules.imports.importer import Taxonomy
@@ -58,6 +59,7 @@ from app.modules.vendors.models import (
     VendorCertification,
     VendorEquipment,
     VendorIndustry,
+    VendorLocation,
     VendorService,
     VendorSource,
 )
@@ -530,6 +532,18 @@ class SearchService:
         stmt = select(Vendor).where(Vendor.id.in_(ids), Vendor.status == VendorStatus.ACTIVE)
         if filters.countries:
             stmt = stmt.where(Vendor.hq_country.in_(filters.countries))
+        if filters.factory_countries:
+            stmt = stmt.where(
+                Vendor.id.in_(_located(LocationType.FACTORY, _codes(filters.factory_countries)))
+            )
+        if filters.support_countries:
+            codes = _codes(filters.support_countries)
+            stmt = stmt.where(
+                or_(
+                    Vendor.id.in_(_located(LocationType.SERVICE_CENTER, codes)),
+                    Vendor.id.in_(_serves(codes)),
+                )
+            )
         if (filters.my_vendors_only or filters.avl_status) and self.principal.tenant_id is not None:
             link = and_(
                 TenantVendorLink.vendor_id == Vendor.id,
@@ -661,3 +675,38 @@ class SearchService:
         ):
             out.append(Suggestion(kind="vendor", label=name, value=str(vid)))
         return out[: limit * 2]
+
+
+_ANYWHERE = ("global", "worldwide", "international")
+
+
+def _codes(values: list[str]) -> list[str]:
+    """Country filters as ISO codes ("Norway", "no", "NO" -> "NO"); an unknown country is refused, not ignored."""
+    codes = []
+    for v in values:
+        code = normalize_country(v)
+        if code is None:
+            raise ValidationFailed(
+                f"Unknown country {v!r}",
+                errors=[{"field": "filters", "message": "use a country name or ISO code"}],
+            )
+        codes.append(code)
+    return codes
+
+
+def _located(kind: LocationType, codes: list[str]) -> Any:
+    return select(VendorLocation.vendor_id).where(
+        VendorLocation.location_type == kind,
+        VendorLocation.country.in_(codes),
+        VendorLocation.status == FactStatus.APPROVED,
+    )
+
+
+def _serves(codes: list[str]) -> Any:
+    """Vendors with an approved service whose regions name one of the countries (or say global / worldwide)."""
+    names = {n for c in codes for n in country_names(c)} | set(_ANYWHERE)
+    region = func.lower(func.unnest(VendorService.regions)).label("region")
+    regions = (
+        select(VendorService.vendor_id, region).where(VendorService.status == FactStatus.APPROVED).subquery()
+    )
+    return select(regions.c.vendor_id).where(regions.c.region.in_(names))

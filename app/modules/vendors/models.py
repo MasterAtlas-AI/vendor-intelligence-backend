@@ -55,6 +55,8 @@ class Vendor(Entity, Base):
     hq_country: Mapped[str | None] = mapped_column(CHAR(2))
     hq_city: Mapped[str | None] = mapped_column(String(120))
     parent_company: Mapped[str | None] = mapped_column(String(300))  # SOW 5.1: the group it belongs to
+    # SOW 5.25: what the vendor can make (processes, size / weight limits, test facilities, in-house vs outsourced)
+    manufacturing_capability: Mapped[str] = mapped_column(Text, default="", server_default="")
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[VendorStatus] = mapped_column(
         pg_enum(VendorStatus, "vendor_status"), default=VendorStatus.ACTIVE

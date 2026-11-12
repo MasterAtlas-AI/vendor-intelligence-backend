@@ -57,7 +57,7 @@ class ChatAction(BaseModel):
 class AgentStep(BaseModel):
     """One step the assistant took for a message, shown as the agent's plan and in the activity log."""
 
-    key: Literal["understand", "search_kb", "load_records", "history", "answer", "check", "rank"]
+    key: Literal["understand", "search_kb", "load_records", "history", "documents", "answer", "check", "rank"]
     label: str
     detail: str
     ms: int
@@ -97,6 +97,20 @@ class ShortlistRow(BaseModel):
     )
     our_equipment: int = 0
     flags: list[str]  # gaps worth checking ("No project references on record")
+
+
+class DocumentMatch(BaseModel):
+    """One of the organization's project documents (report, letter, datasheet...) whose words match the request
+    (SOW 25.4: unstructured information beside the structured records)."""
+
+    ref: str  # "D1": cited in the answer only when the organization shares its data with the AI
+    document_id: uuid.UUID
+    project_id: uuid.UUID
+    project_name: str
+    doc_type: str
+    doc_number: str
+    title: str
+    snippet: str  # matched words wrapped in [[ ]]
 
 
 class HistoryMatch(BaseModel):
@@ -139,6 +153,7 @@ class ChatResponse(BaseModel):
     history_matches: list[HistoryMatch] = Field(
         default_factory=list
     )  # the organization's own matching equipment
+    document_matches: list[DocumentMatch] = Field(default_factory=list)  # and its matching project documents
 
 
 # ---------------------------------------------------------------- saved chats

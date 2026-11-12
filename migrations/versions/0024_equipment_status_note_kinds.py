@@ -41,6 +41,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # knowledge_notes forces row-level security: without platform context the UPDATE would see no rows.
+    op.execute("SELECT set_config('app.is_platform', 'on', true)")
     op.execute("UPDATE knowledge_notes SET kind = 'other' WHERE kind IN ('inspection', 'project_update')")
     op.execute(_DROP_KIND)
     op.create_check_constraint("kind", "knowledge_notes", f"kind IN ({OLD_KINDS})")

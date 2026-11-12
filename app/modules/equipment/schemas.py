@@ -22,8 +22,10 @@ NoteKind = Literal[
 EquipmentStatus = Literal[
     "planned", "ordered", "delivered", "installed", "in_service", "standby", "decommissioned"
 ]
-ProcurementStatus = Literal["ordered", "manufacturing", "shipped", "delivered", "cancelled"]
-RecordType = Literal["po", "quotation"]
+ProcurementStatus = Literal[
+    "raised", "approved", "ordered", "manufacturing", "shipped", "delivered", "cancelled"
+]
+RecordType = Literal["pr", "mr", "po", "quotation"]  # purchase / material requisition, PO, quotation
 TechnicalStatus = Literal["accepted", "conditional", "rejected"]
 Department = Literal[
     "engineering",
@@ -368,6 +370,7 @@ class MelDecisionResult(BaseModel):
     rejected: int
     skipped: int  # already decided, or not found
     vendors_linked: int  # matched vendors added to the organization's vendor list
+    updated: int = 0  # rows that matched a line already recorded: that line was updated, not duplicated
 
 
 # ---------------------------------------------------------------- similarity / near-fit
@@ -376,6 +379,10 @@ class MelDecisionResult(BaseModel):
 class SimilarRequest(_In):
     category_code: str | None = None
     service: str = Field(default="", max_length=120)  # duty / fluid: lines in the same service score higher
+    # SOW 13.2: material of construction, package configuration, environment (the project's location)
+    material: str = Field(default="", max_length=120)
+    package_configuration: str = Field(default="", max_length=200)
+    location: Literal["offshore", "onshore"] | None = None
     attributes: dict[str, float] = Field(
         default_factory=dict, max_length=10
     )  # target values, canonical units

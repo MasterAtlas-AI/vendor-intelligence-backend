@@ -21,7 +21,10 @@ from app.modules.assistant.router import router as assistant_router
 from app.modules.audit.router import router as audit_router
 from app.modules.auth.router import router as auth_router
 from app.modules.discovery.router import router as discovery_router
+from app.modules.equipment.benchmarks import router as benchmarks_router
+from app.modules.equipment.documents import router as documents_router
 from app.modules.equipment.router import router as equipment_router
+from app.modules.equipment.trends import router as trends_router
 from app.modules.imports.router import router as imports_router
 from app.modules.jobs.router import router as jobs_router
 from app.modules.projects.router import router as projects_router
@@ -33,7 +36,9 @@ from app.modules.search.router import router as search_router
 from app.modules.taxonomy.router import router as taxonomy_router
 from app.modules.tenants.router import router as tenants_router
 from app.modules.users.router import router as users_router
+from app.modules.vendors.risk import router as risk_router
 from app.modules.vendors.router import router as vendors_router
+from app.modules.vendors.sources import router as sources_router
 from app.modules.webhooks.router import router as webhooks_router
 
 log = get_logger(__name__)
@@ -106,6 +111,11 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         jobs_router,
         taxonomy_router,
         vendors_router,
+        sources_router,
+        risk_router,
+        documents_router,
+        benchmarks_router,
+        trends_router,
         proposals_router,
         imports_router,
         ai_router,

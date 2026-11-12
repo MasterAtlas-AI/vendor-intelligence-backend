@@ -42,6 +42,9 @@ class SearchFilters(BaseModel):
     used_by_us: bool = False
     used_on_projects: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     technically_accepted_by_us: bool = False  # passed one of the organization's technical bid evaluations
+    # SOW 16.4: a factory in one of these countries; SOW 5.23: a service centre there, or service offered there
+    factory_countries: list[str] = Field(default_factory=list, max_length=20)
+    support_countries: list[str] = Field(default_factory=list, max_length=20)
 
 
 class SearchRequest(BaseModel):

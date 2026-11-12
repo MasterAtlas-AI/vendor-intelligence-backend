@@ -31,15 +31,21 @@ from app.crawler.html_text import html_to_text
 from app.discovery import pipeline
 from app.domain.enums import FactStatus, ProposalItemAction, ProposalKind, ProposalOrigin, VendorStatus
 from app.domain.normalization import normalize_country, normalize_name, normalize_website, registrable_domain
-from app.modules.proposals.payloads import AddContact
+from app.modules.proposals.payloads import AddCertification, AddContact
 from app.modules.proposals.service import NewItem, ProposalService
-from app.modules.vendors.models import Vendor, VendorContact, VendorDomain, VendorEquipment
+from app.modules.vendors.models import (
+    Vendor,
+    VendorCertification,
+    VendorContact,
+    VendorDomain,
+    VendorEquipment,
+)
 from app.workers.runner import JobContext
 
 log = get_logger(__name__)
 
-Field_ = Literal["website", "hq_country", "description", "contacts"]
-FIELDS: tuple[Field_, ...] = ("website", "hq_country", "description", "contacts")
+Field_ = Literal["website", "hq_country", "description", "contacts", "class_approvals"]
+FIELDS: tuple[Field_, ...] = ("website", "hq_country", "description", "contacts", "class_approvals")
 CONTACT_PAGES = 8  # home, contact and about pages of the vendor's own site
 
 MAX_VENDORS = 25
@@ -462,6 +468,148 @@ async def _lookup_contacts(
     return row, Accepted(items)
 
 
+# ---------------------------------------------------------------- SOW 7.4: classification society registers
+
+# Each society's public type-approval register lives on its own site; the search is held to these domains, and a
+# finding counts only when its source page is on one of them.
+CLASS_REGISTERS: dict[str, tuple[str, str]] = {
+    # society -> (certification type code, register domain)
+    "DNV": ("DNV_TA", "dnv.com"),
+    "ABS": ("ABS_TA", "eagle.org"),
+    "LR": ("LR_TA", "lr.org"),
+    "BV": ("BV_TA", "bureauveritas.com"),
+    "IRS": ("IRS_TA", "irclass.org"),
+    "CCS": ("CCS_TA", "ccs.org.cn"),
+    "KR": ("KR_TA", "krs.co.kr"),
+    "ClassNK": ("NK_TA", "classnk.or.jp"),
+}
+_SOCIETY_ALIASES = {
+    "dnv": "DNV", "dnv gl": "DNV", "dnvgl": "DNV", "det norske veritas": "DNV",
+    "abs": "ABS", "american bureau of shipping": "ABS",
+    "lr": "LR", "lloyd's register": "LR", "lloyds register": "LR", "lloyd's": "LR",
+    "bv": "BV", "bureau veritas": "BV",
+    "irs": "IRS", "indian register of shipping": "IRS", "irclass": "IRS",
+    "ccs": "CCS", "china classification society": "CCS",
+    "kr": "KR", "korean register": "KR",
+    "classnk": "ClassNK", "nk": "ClassNK", "nippon kaiji kyokai": "ClassNK",
+}  # fmt: skip
+
+
+class FoundApproval(BaseModel):
+    society: str = Field(description="DNV, ABS, LR, BV, IRS, CCS, KR or ClassNK.")
+    certificate_number: str | None = Field(
+        description="The type approval certificate number as the register shows it."
+    )
+    product: str = Field(description="The approved product or product type, as the register describes it.")
+    valid_to: str | None = Field(description="Expiry date, YYYY-MM-DD, or null if the register shows none.")
+    url: str | None = Field(description="The register page that shows this certificate.")
+
+
+class ClassApprovalsFinding(BaseModel):
+    approvals: list[FoundApproval]
+    confidence: float = Field(ge=0, le=1, description="How sure these certificates belong to this company.")
+    reason: str = Field(description="One sentence: how the company was matched on the registers.")
+
+
+FIND_CLASS_APPROVALS = register(
+    Prompt(
+        name="vendor_class_approvals_lookup",
+        version=1,
+        reasoning_effort="low",
+        instructions=f"""{_ROLE}
+Search the classification societies' public type-approval registers (DNV, ABS, Lloyd's Register, Bureau Veritas,
+IRS, CCS, Korean Register, ClassNK) for type approval certificates held by the company.
+{_SAME_COMPANY}
+- List only certificates a register page shows for this company (as manufacturer or certificate holder): society,
+  certificate number, the approved product, expiry date and the page's URL. Expired certificates are listed too.
+- Never guess a certificate number or a date. If no register lists the company, return an empty list.
+{DATA_RULE}""",
+        template="Company:\n{company}",
+    )
+)
+
+
+def _society(text: str) -> str | None:
+    key = " ".join(text.lower().replace(".", "").split())
+    return _SOCIETY_ALIASES.get(key) or next((s for s in CLASS_REGISTERS if s.lower() == key), None)
+
+
+def _register_url(url: str | None, citations: list[Citation], society: str) -> str | None:
+    """The finding's own page if it is on that society's register site, else a cited page on that site."""
+    domain = CLASS_REGISTERS[society][1]
+    for candidate in [url, *(c.url for c in citations)]:
+        if candidate and (registrable_domain(candidate) or "").endswith(domain):
+            return candidate
+    return None
+
+
+async def _lookup_class_approvals(
+    vendor: dict[str, Any], ctx: JobContext, call: CallContext
+) -> tuple[LookupRow, Accepted | None]:
+    row = LookupRow(vendor_id=vendor["id"], name=vendor["name"], status="not_found")
+    assert ctx.ai is not None
+    domains = sorted({d for _, d in CLASS_REGISTERS.values()})
+    try:
+        res = await ctx.ai.run(FIND_CLASS_APPROVALS, ClassApprovalsFinding, call, web_search=True,
+                               allowed_domains=domains, company=vendor["profile"])  # fmt: skip
+    except BudgetExceeded:
+        raise
+    except AIError as exc:
+        row.status, row.reason = "failed", f"AI lookup failed: {str(exc)[:200]}"
+        return row, None
+    found = res.output
+    row.confidence, row.reason = round(found.confidence, 2), found.reason.strip()[:300]
+    if not found.approvals:
+        return row, None
+    if found.confidence < MIN_CONFIDENCE_CITED_ONLY:
+        row.status = "rejected"
+        row.reason = f"Not sure these belong to this company ({found.confidence:.0%}). {row.reason}"[:300]
+        return row, None
+    known = vendor.get("certificate_numbers", set())
+    items: list[NewItem] = []
+    unsourced = duplicates = 0
+    for a in found.approvals:
+        society = _society(a.society)
+        if society is None:
+            unsourced += 1
+            continue
+        url = _register_url(a.url, res.citations, society)
+        number = (a.certificate_number or "").strip()
+        if url is None:
+            unsourced += 1
+            continue
+        if number and number.lower() in known:
+            duplicates += 1
+            continue
+        try:
+            payload = AddCertification.model_validate({
+                "certification_code": CLASS_REGISTERS[society][0], "certificate_number": number or None,
+                "scope": a.product.strip()[:2000], "valid_to": a.valid_to or None,
+            })  # fmt: skip
+        except ValueError:
+            payload = AddCertification.model_validate({"certification_code": CLASS_REGISTERS[society][0],
+                                                       "certificate_number": number or None,
+                                                       "scope": a.product.strip()[:2000]})  # fmt: skip
+        items.append(NewItem(ProposalItemAction.ADD_CERTIFICATION, payload.model_dump(mode="json"),
+                             evidence=_web(url, f"{society} type approval register", f"{number} {a.product}".strip()),
+                             confidence=Decimal(str(round(found.confidence, 2)))))  # fmt: skip
+        row.found.append(
+            " · ".join(x for x in (society, number, a.product, a.valid_to and f"valid to {a.valid_to}") if x)
+        )
+        row.source_url = row.source_url or url
+    notes = [row.reason] if row.reason else []
+    if unsourced:
+        notes.append(f"{unsourced} without a register page left out")
+    if duplicates:
+        notes.append(f"{duplicates} already recorded")
+    row.reason = "; ".join(notes)[:300]
+    if not items:
+        row.status = "rejected" if unsourced else "already_filled" if duplicates else "not_found"
+        return row, None
+    row.value, row.checked = f"{len(items)} type approval(s)", "citation"
+    return row, Accepted(items)
+
+
 Checker = Callable[[Any, list[Citation], dict[str, Any], LookupRow, JobContext], Awaitable[Accepted | None]]
 LOOKUPS: dict[Field_, tuple[Prompt, type[BaseModel], Checker, str]] = {
     "website": (FIND_WEBSITE, WebsiteFinding, _check_website, "Website"),
@@ -469,12 +617,21 @@ LOOKUPS: dict[Field_, tuple[Prompt, type[BaseModel], Checker, str]] = {
     "description": (FIND_DESCRIPTION, DescriptionFinding, _check_description, "Description"),
     # Contacts read the vendor's own pages instead of searching the web (see _lookup_contacts).
     "contacts": (FIND_CONTACTS, ContactsFinding, _check_description, "Contact details"),
+    # Class approvals search only the societies' registers (see _lookup_class_approvals).
+    "class_approvals": (
+        FIND_CLASS_APPROVALS,
+        ClassApprovalsFinding,
+        _check_description,
+        "Class type approvals",
+    ),
 }
 
 
 def already_filled(v: Vendor, field: Field_, with_contacts: set[uuid.UUID] | None = None) -> str | None:
     if field == "contacts":
         return "Has contact details" if with_contacts and v.id in with_contacts else None
+    if field == "class_approvals":
+        return None  # always worth a look: certificates are added and renewed
     if field == "website":
         return v.website or (v.domains[0].domain if v.domains else None)
     if field == "hq_country":
@@ -487,6 +644,8 @@ async def lookup_one(
 ) -> tuple[LookupRow, Accepted | None]:
     if field == "contacts":
         return await _lookup_contacts(vendor, ctx, call)
+    if field == "class_approvals":
+        return await _lookup_class_approvals(vendor, ctx, call)
     row = LookupRow(vendor_id=vendor["id"], name=vendor["name"], status="not_found")
     prompt, schema, check, _ = LOOKUPS[field]
     assert ctx.ai is not None
@@ -564,7 +723,18 @@ async def vendor_lookup_handler(ctx: JobContext) -> dict[str, Any]:
                 "supplies": sorted(set(supplies))[:10] or None,
                 "description": (v.description or "")[:300] or None,
             }
-            targets.append({"id": v.id, "name": v.display_name, "current": profile,
+            numbers: set[str] = set()
+            if field == "class_approvals":
+                numbers = {
+                    (n or "").lower()
+                    for n in await s.scalars(
+                        select(VendorCertification.certificate_number).where(
+                            VendorCertification.vendor_id == v.id,
+                            VendorCertification.certificate_number.is_not(None),
+                        )
+                    )
+                }
+            targets.append({"id": v.id, "name": v.display_name, "current": profile, "certificate_numbers": numbers,
                             "profile": {k: x for k, x in profile.items() if x}})  # fmt: skip
 
     await ctx.progress("searching", 5)

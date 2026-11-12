@@ -17,7 +17,7 @@ from app.core.exceptions import NotFound, ValidationFailed
 from app.domain.enums import VendorStatus
 from app.domain.normalization import normalize_name
 from app.modules.equipment.classify import classify
-from app.modules.equipment.models import EquipmentAttribute, MelRow
+from app.modules.equipment.models import EquipmentAttribute, MelRow, ProjectEquipment
 from app.modules.equipment.units import parse_quantity
 from app.modules.imports.importer import Taxonomy
 from app.modules.imports.models import Upload
@@ -538,6 +538,13 @@ async def parse_row(
     return parsed, issues
 
 
+def line_key(tag: str | None, name: str | None) -> str:
+    """What makes two MEL lines the same equipment: the tag ("P-101 A" = "p-101a"), or for an untagged line its
+    description."""
+    t = re.sub(r"\s+", "", (tag or "").upper())
+    return f"tag:{t}" if t else "name:" + " ".join((name or "").lower().split())
+
+
 async def mel_import_handler(ctx: JobContext) -> dict[str, Any]:
     """Parses an uploaded MEL into reviewable rows (replacing that upload's pending rows)."""
     inp = ctx.input
@@ -558,6 +565,15 @@ async def mel_import_handler(ctx: JobContext) -> dict[str, Any]:
         rows, truncated = data_rows(sheet, header_row, ctx.settings.import_max_rows)
         matcher = _Matcher(s, await Taxonomy.load(s))
         await s.execute(delete(MelRow).where(MelRow.upload_id == upload_id, MelRow.status == "pending"))
+        # SOW 8.9: lines already recorded for this project (a re-import or a newer MEL revision).
+        recorded: dict[str, tuple[uuid.UUID, str]] = {}
+        for eid, etag, ename in await s.execute(
+            select(ProjectEquipment.id, ProjectEquipment.tag, ProjectEquipment.name).where(
+                ProjectEquipment.project_id == project_id, ProjectEquipment.verification != "archived"
+            )
+        ):
+            recorded.setdefault(line_key(etag, ename), (eid, etag or ename))
+        seen: dict[str, int] = {}  # key -> row number, within this file
         counts = {
             "rows": 0,
             "with_issues": 0,
@@ -565,6 +581,7 @@ async def mel_import_handler(ctx: JobContext) -> dict[str, Any]:
             "vendors_matched": 0,
             "sections": 0,
             "skipped": 0,
+            "duplicates": 0,
         }
         group: str | None = None
         for i, (row_number, values) in enumerate(rows):
@@ -581,6 +598,19 @@ async def mel_import_handler(ctx: JobContext) -> dict[str, Any]:
                 counts["skipped"] += 1  # deleted lines ("A4 | - | - | ... Deleted"), "NOTE:" and the like
                 continue
             parsed, issues = await parse_row(matcher, defs, names, values, mapping, group)
+            key = line_key(parsed["tag"], parsed["name"])
+            if key in recorded:
+                parsed["duplicate_of"] = str(recorded[key][0])
+                issues.append(
+                    f"Already recorded on this project ({recorded[key][1][:60]}): approving updates that line"
+                )
+                counts["duplicates"] += 1
+            elif key in seen:
+                issues.append(
+                    f"Same {'tag' if parsed['tag'] else 'description'} as row {seen[key]} of this file"
+                )
+                counts["duplicates"] += 1
+            seen.setdefault(key, row_number)
             s.add(
                 MelRow(
                     tenant_id=ctx.tenant_id,

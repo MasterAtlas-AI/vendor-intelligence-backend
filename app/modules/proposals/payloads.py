@@ -64,7 +64,14 @@ class CreateVendor(_Payload):
 
 
 VendorField = Literal[
-    "legal_name", "display_name", "website", "hq_country", "hq_city", "description", "parent_company"
+    "legal_name",
+    "display_name",
+    "website",
+    "hq_country",
+    "hq_city",
+    "description",
+    "parent_company",
+    "manufacturing_capability",
 ]
 
 

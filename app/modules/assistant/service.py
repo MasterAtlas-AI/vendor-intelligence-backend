@@ -43,6 +43,7 @@ from app.modules.assistant.schemas import (
     CitedVendor,
     ConversationDetail,
     DimensionScores,
+    DocumentMatch,
     HistoryMatch,
     SavedMessage,
     ShortlistRow,
@@ -50,6 +51,7 @@ from app.modules.assistant.schemas import (
     WebPage,
     WebSource,
 )
+from app.modules.equipment.documents import DocumentHit, find_documents
 from app.modules.equipment.schemas import EquipmentSearch, ProjectEquipmentRead
 from app.modules.equipment.service import EquipmentService
 from app.modules.search.schemas import SearchFilters, SearchHit, SearchIntent, SearchRequest
@@ -67,6 +69,8 @@ HISTORY_MESSAGES = 10
 REF = re.compile(r"\[(V\d{1,2})\]")
 WEB_REF = re.compile(r"\[(W\d{1,2})\]")
 HIST_REF = re.compile(r"\[(H\d{1,2})\]")  # the organization's own equipment lines
+DOC_REF = re.compile(r"\[(D\d{1,2})\]")  # and its project documents
+DOCUMENTS = 5
 HISTORY_LINES = 10
 # Follow-ups must be the user's next questions, not the assistant offering to do something.
 OFFER = re.compile(r"^(do you want|would you like|should i|shall i|can i|may i|want me)\b", re.IGNORECASE)
@@ -260,6 +264,21 @@ def _history_record(ref: str, e: ProjectEquipmentRead) -> dict[str, Any]:
     }
 
 
+def _document_record(ref: str, d: DocumentHit) -> dict[str, Any]:
+    """One of the organization's documents as the answer model sees it: the matching passage, not the file."""
+    return {
+        "ref": ref,
+        "project": d.project_name,
+        "type": d.doc_type,
+        "number": d.doc_number,
+        "title": d.title,
+        "date": d.doc_date.isoformat() if d.doc_date else None,
+        "equipment": d.equipment_label or None,
+        "vendor": d.vendor_name or None,
+        "passage": d.snippet.replace("[[", "").replace("]]", "") or None,
+    }
+
+
 class AssistantService:
     def __init__(self, session: AsyncSession, principal: Principal, ai: AiService) -> None:
         self.s = session
@@ -395,7 +414,20 @@ class AssistantService:
                 f"{len(lines)} matching equipment line{'s' if len(lines) != 1 else ''} in your projects"
                 + ("" if controls.share_private_data or not lines else " (kept on the server)"),
             )
+        # SOW 25.4: the organization's documents (reports, letters, datasheets) whose words match, searched locally.
+        found_docs: list[DocumentHit] = []
+        if has_history:
+            words = " ".join(searched) or req.messages[-1].content
+            found_docs, _ = await find_documents(self.s, words[:400], any_word=True, limit=DOCUMENTS)
+            step(
+                "documents",
+                "Search your project documents",
+                f"{len(found_docs)} matching document{'s' if len(found_docs) != 1 else ''}"
+                + ("" if controls.share_private_data or not found_docs else " (kept on the server)"),
+            )
+        doc_refs = {f"D{i}": d for i, d in enumerate(found_docs, start=1)}
         shared = hist_refs if controls.share_private_data else {}
+        shared_docs = doc_refs if controls.share_private_data else {}
         web = plan.intent != "out_of_scope"
         answered = await self.ai.run(
             ANSWER,
@@ -408,10 +440,11 @@ class AssistantService:
                 _record(ref, v, controls.share_private_data, our_history.get(v.id)) for ref, v in refs.items()
             ],
             history=[_history_record(ref, e) for ref, e in shared.items()],
+            documents=[_document_record(ref, d) for ref, d in shared_docs.items()],
         )
         answer = answered.output
         pages = self._web_pages(answer.web_sources, answered.citations)
-        text, removed = self._ground(answer.answer, refs, pages, shared)
+        text, removed = self._ground(answer.answer, refs, pages, {**shared, **shared_docs})
         cited = [r for r in dict.fromkeys(REF.findall(text)) if r in refs]
         web_cited = [pages[r] for r in dict.fromkeys(WEB_REF.findall(text)) if r in pages]
         step(
@@ -463,6 +496,19 @@ class AssistantService:
                     verification=e.verification,
                 )
                 for ref, e in hist_refs.items()
+            ],
+            document_matches=[
+                DocumentMatch(
+                    ref=ref,
+                    document_id=d.id,
+                    project_id=d.project_id,
+                    project_name=d.project_name,
+                    doc_type=d.doc_type,
+                    doc_number=d.doc_number,
+                    title=d.title,
+                    snippet=d.snippet,
+                )
+                for ref, d in doc_refs.items()
             ],
         )
         return await self._save(saved, req.messages[-1].content, reply)
@@ -632,5 +678,5 @@ class AssistantService:
             removed += 1
             return ""
 
-        text = HIST_REF.sub(keep, WEB_REF.sub(keep, REF.sub(keep, text)))
+        text = DOC_REF.sub(keep, HIST_REF.sub(keep, WEB_REF.sub(keep, REF.sub(keep, text))))
         return re.sub(r"[ \t]{2,}", " ", text).strip(), removed
