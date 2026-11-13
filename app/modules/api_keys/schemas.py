@@ -26,6 +26,30 @@ class ApiKeyCreate(BaseModel):
         return [str(ipaddress.ip_network(n, strict=False)) for n in v]
 
 
+class ApiKeyUpdate(BaseModel):
+    """Changes to an existing key; the secret stays the same. Only the fields sent change; `expires_at: null`
+    removes the expiry."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    scopes: list[str] | None = Field(default=None, min_length=1, max_length=20)
+    expires_at: datetime | None = None
+    ip_allowlist: list[str] | None = Field(default=None, max_length=20)
+    rate_limit_per_minute: int | None = Field(default=None, ge=10, le=10_000)
+
+    @field_validator("expires_at")
+    @classmethod
+    def _future(cls, v: datetime | None) -> datetime | None:
+        if v is not None and v.astimezone(UTC) <= datetime.now(UTC):
+            raise ValueError("must be in the future")
+        return v
+
+    @field_validator("ip_allowlist")
+    @classmethod
+    def _networks(cls, v: list[str] | None) -> list[str] | None:
+        return None if v is None else [str(ipaddress.ip_network(n, strict=False)) for n in v]
+
+
 class ApiKeyRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
