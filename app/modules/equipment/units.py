@@ -39,7 +39,23 @@ UNITS: dict[str, tuple[str, dict[str, float]]] = {
             "kg/cm2": 0.980665,
         },
     ),
-    "temperature": ("°C", {"°c": 1, "degc": 1, "deg c": 1, "oc": 1, "c": 1, "°f": 1, "degf": 1, "f": 1}),
+    "temperature": (
+        "°C",
+        {
+            "°c": 1,
+            "degc": 1,
+            "deg c": 1,
+            "deg. c": 1,
+            "oc": 1,
+            "c": 1,
+            "°f": 1,
+            "degf": 1,
+            "deg f": 1,
+            "deg. f": 1,
+            "of": 1,
+            "f": 1,
+        },
+    ),
     "power": (
         "kW",
         {"kw": 1, "kwe": 1, "kwm": 1, "kwb": 1, "mw": 1000, "hp": 0.7457, "bhp": 0.7457, "w": 0.001},
@@ -63,7 +79,7 @@ UNITS: dict[str, tuple[str, dict[str, float]]] = {
     "voltage": ("V", {"v": 1, "kv": 1000}),
     "volume": ("m3", {"m3": 1, "m³": 1, "l": 0.001, "bbl": 0.158987}),
 }
-_FAHRENHEIT = {"°f", "degf", "f"}
+_FAHRENHEIT = {"°f", "degf", "deg f", "deg. f", "of", "f"}
 
 _NUMBER = r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?"
 _DASH = "-~" + chr(0x2013) + chr(0x2014)  # hyphen, tilde, en dash, em dash

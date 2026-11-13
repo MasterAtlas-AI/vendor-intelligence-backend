@@ -4,7 +4,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.deps import PrincipalDep, SessionDep, require
-from app.core.exceptions import NotFound
+from app.api.files import attachment
+from app.core.exceptions import Forbidden, NotFound
 from app.domain.enums import AvlStatus
 from app.domain.permissions import P
 from app.domain.principal import Principal
@@ -90,7 +91,11 @@ async def list_vendor_documents(
 async def download_vendor_document(
     vendor_id: uuid.UUID, upload_id: uuid.UUID, principal: CanRead, session: SessionDep
 ) -> Response:
-    """The original file (only one of your organization's documents linked to this vendor)."""
+    """The original file (only one of your organization's documents linked to this vendor). Import files can hold
+    prices and internal vendor lists, so downloading one needs upload:create or commercial:read; everyone who reads
+    the vendor still sees which documents its facts came from."""
+    if not (principal.has(P.UPLOAD_CREATE) or principal.has(P.COMMERCIAL_READ)):
+        raise Forbidden("Downloading source files needs import rights or access to commercial data")
     from sqlalchemy import select
     from sqlalchemy.orm import undefer
 
@@ -101,11 +106,10 @@ async def download_vendor_document(
     upload = await session.scalar(select(Upload).where(Upload.id == upload_id).options(undefer(Upload.data)))
     if upload is None:
         raise NotFound("Document not found")
-    safe = upload.filename.replace('"', "")
     return Response(
         upload.data,
         media_type=upload.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+        headers=attachment(upload.filename, "document"),
     )
 
 

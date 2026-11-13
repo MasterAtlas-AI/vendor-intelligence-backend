@@ -133,6 +133,16 @@ async def test_source_documents_are_linked_back_for_their_organization_only(
     assert file.status_code == 200 and file.content == pdf
     assert 'filename="brochure.pdf"' in file.headers["content-disposition"]
 
+    # Everyone who reads the vendor sees the list; the file itself needs import rights or commercial access.
+    viewer = await factory.user(tenant, ["viewer"])
+    planner = await factory.user(tenant, ["planning"])  # commercial:read, no imports
+    listed = (await client.get(f"{API}/vendors/{vendor}/documents", headers=viewer.headers)).json()
+    assert [d["upload_id"] for d in listed] == [up["id"]]
+    denied = await client.get(f"{API}/vendors/{vendor}/documents/{up['id']}", headers=viewer.headers)
+    assert denied.status_code == 403
+    allowed = await client.get(f"{API}/vendors/{vendor}/documents/{up['id']}", headers=planner.headers)
+    assert allowed.status_code == 200 and allowed.content == pdf
+
     # Which organization uploaded what stays private.
     assert (await client.get(f"{API}/vendors/{vendor}/documents", headers=outsider.headers)).json() == []
     other = await client.get(f"{API}/vendors/{vendor}/documents/{up['id']}", headers=outsider.headers)

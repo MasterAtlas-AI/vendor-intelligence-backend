@@ -13,6 +13,7 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
+import anyio
 from fastapi import APIRouter, Depends, Form, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Integer, cast, func, literal_column, or_, select
@@ -21,6 +22,7 @@ from sqlalchemy.orm import undefer
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.api.deps import ContainerDep, PrincipalDep, SessionDep, require
+from app.api.files import attachment
 from app.core.exceptions import NotFound, ValidationFailed
 from app.domain.permissions import P
 from app.domain.principal import Principal
@@ -202,7 +204,7 @@ async def add_document(
         size_bytes=len(data),
         data=bytes(data),
     )
-    _store_text(doc, bytes(data))
+    await _store_text(doc, bytes(data))
     session.add(doc)
     await session.flush()
     record_audit(
@@ -222,12 +224,12 @@ async def add_document(
     return (await _labels(session, [doc]))[0]
 
 
-def _store_text(doc: ProjectDocument, data: bytes) -> None:
-    text = read_text(data, doc.filename).text
+async def _store_text(doc: ProjectDocument, data: bytes) -> None:
+    text = (await anyio.to_thread.run_sync(read_text, data, doc.filename)).text
     doc.text_content, doc.text_chars = text, len(text)
 
 
-async def _read_unread(session: AsyncSession, limit: int = 25) -> None:
+async def _read_unread(session: AsyncSession, limit: int = 5) -> None:
     """Reads the text of documents added before text was kept (a few per call, so a search stays quick)."""
     unread = list(
         await session.scalars(
@@ -238,7 +240,7 @@ async def _read_unread(session: AsyncSession, limit: int = 25) -> None:
         )
     )
     for doc in unread:
-        _store_text(doc, doc.data or b"")
+        await _store_text(doc, doc.data or b"")
     if unread:
         await session.commit()
 
@@ -379,7 +381,8 @@ async def document_ratings(document_id: uuid.UUID, _: Reader, session: SessionDe
     )
     if doc is None:
         raise NotFound("Document not found")
-    found, source = read_ratings(read_text(doc.data or b"", doc.filename))
+    parsed = await anyio.to_thread.run_sync(read_text, doc.data or b"", doc.filename)
+    found, source = read_ratings(parsed)
     line = await session.get(ProjectEquipment, doc.equipment_id) if doc.equipment_id else None
     defs = {a.key: a for a in await session.scalars(select(EquipmentAttribute))}
     current = (line.attributes or {}) if line else {}
@@ -459,9 +462,8 @@ async def download_document(
     )
     if doc is None or doc.data is None:
         raise NotFound("Document not found")
-    safe = doc.filename.replace('"', "") or "document"
     return Response(
         doc.data,
         media_type=doc.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+        headers=attachment(doc.filename, "document"),
     )

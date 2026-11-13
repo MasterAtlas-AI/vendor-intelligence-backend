@@ -224,3 +224,28 @@ def test_units_used_by_engineering_lists() -> None:
     assert parse_quantity("20 MT", "mass") == [20.0, 20.0]
     assert parse_quantity("120 oC", "temperature") == [120.0, 120.0]
     assert parse_quantity("1600 kWe", "power") == [1600.0, 1600.0]
+
+
+def test_review_fixes_tbe_lead_time_quantity_tags_and_units() -> None:
+    from app.modules.equipment.mel import _quantity, _read_number, _tag, _weeks, line_key, technical_status
+
+    assert [technical_status(x) for x in (
+        "Not technically acceptable", "NOT TA", "Not OK", "Acceptable, no comments", "Acceptable with comments", "TA",
+    )] == ["rejected", "rejected", "rejected", "accepted", "conditional", "accepted"]  # fmt: skip
+    assert [_weeks(x) for x in ("16-18 wks", "6 months", "90 days", "2017-05-01", "16 ARO")] == [
+        16,
+        26,
+        13,
+        None,
+        16,
+    ]
+    assert [_quantity(x) for x in ("2 x 50%", "1W + 1S", "")] == [2, 2, 1]
+    assert _tag("From Project Tag Numbering Procedure") == "" and _tag("P-101A") == "P-101A"
+    assert _read_number("212", "temperature", "DESIGN TEMP (oF)") == [100.0, 100.0]
+    # A tagged line whose only other text is the vendor is equipment, not a section heading.
+    assert (
+        group_heading(["P-101A", "", "", "FLOWSERVE"], {"tag": 0, "name": 1, "service": 2, "vendor": 3})
+        is None
+    )
+    # Untagged lines are told apart by their system or package.
+    assert line_key("", "Lube oil pump", "Train A") != line_key("", "Lube oil pump", "Train B")

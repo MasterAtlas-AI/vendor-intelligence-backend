@@ -236,7 +236,7 @@ async def test_mel_import_review_search_and_privacy(
     assert pr.status_code == 201 and pr.json()["record_type"] == "pr", pr.text
 
     # SOW 13.2: the requested material counts (Duplex ~ "DSS 22Cr"); offshore lines suit an offshore duty.
-    async def near(material: str) -> float:
+    async def score_for(material: str) -> float:
         r = await client.post(f"{API}/equipment/similar", headers=viewer.headers, json={
             "category_code": BB2, "attributes": {"capacity": 1200}, "material": material, "location": "offshore",
             "include_catalogue": False,
@@ -248,7 +248,7 @@ async def test_mel_import_review_search_and_privacy(
     await client.patch(f"{API}/equipment/{line_id}", headers=admin.headers, json={
         "version": cur["version"], "attributes": {**cur["attributes"], "material": "DSS 22Cr"},
     })  # fmt: skip
-    assert await near("Duplex") > await near("Titanium")
+    assert await score_for("Duplex") > await score_for("Titanium")
 
     # Vendor search: only vendors the organization has used.
     used = await client.post(f"{API}/search", headers=viewer.headers, json={
@@ -411,6 +411,19 @@ async def test_bid_register_parent_company_agents_and_sources(
     assert [r["parsed"]["technical_status"] for r in rows] == ["accepted", "rejected"]
     await client.post(f"{API}/mel/rows/decide", headers=admin.headers,
                       json={"row_ids": [r["id"] for r in rows], "decision": "approve"})  # fmt: skip
+
+    # Prices are commercial data: a viewer reviewing the MEL sees neither the parsed price nor the price cells,
+    # and can't download the original file that holds them.
+    viewer = await factory.user(tenant, ["viewer"])
+    seen = (await client.get(f"{API}/mel/{up['upload_id']}/rows", headers=viewer.headers)).json()["rows"]
+    assert all("amount" not in r["parsed"] and "currency" not in r["parsed"] for r in seen)
+    assert all("Quoted price" not in r["raw"] and "Currency" not in r["raw"] for r in seen)
+    assert seen[0]["raw"]["Description"] == "Ball valve 10in"
+    full = (await client.get(f"{API}/mel/{up['upload_id']}/rows", headers=admin.headers)).json()["rows"]
+    assert full[0]["raw"]["Quoted price"] == "12500"
+    line = next(r["equipment_id"] for r in full if r["equipment_id"])
+    assert (await client.get(f"{API}/equipment/{line}/source", headers=viewer.headers)).status_code == 403
+    assert (await client.get(f"{API}/equipment/{line}/source", headers=admin.headers)).status_code == 200
 
     quotes = (await client.get(f"{API}/procurement-records?vendor_id={vid}", headers=admin.headers)).json()
     assert [(q["record_type"], q["technical_status"], q["amount"], q["currency"], q["lead_time_weeks"])

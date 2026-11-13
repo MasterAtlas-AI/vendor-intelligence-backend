@@ -43,7 +43,7 @@ async def test_project_documents_register(client: AsyncClient, factory: Factory)
             "revision": "Z1",
             "equipment_id": line_id,
             "doc_date": "2021-05-04",
-        },  # fmt: skip
+        },
     )
     assert added.status_code == 201, added.text
     doc = added.json()

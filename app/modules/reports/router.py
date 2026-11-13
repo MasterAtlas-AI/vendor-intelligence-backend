@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import ContainerDep, SessionDep, require
+from app.api.files import attachment
 from app.core.exceptions import Conflict
 from app.domain.permissions import P
 from app.domain.principal import Principal
@@ -77,5 +78,5 @@ async def download_report(
     return Response(
         content=report.data,
         media_type=report.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{report.filename}"'},
+        headers=attachment(report.filename or "", "report"),
     )

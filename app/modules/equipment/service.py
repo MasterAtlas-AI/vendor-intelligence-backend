@@ -11,7 +11,7 @@ from collections import defaultdict
 from typing import Any
 
 import anyio
-from sqlalchemy import Float, Integer, and_, cast, func, or_, select, text
+from sqlalchemy import Float, Integer, and_, case, cast, func, literal, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 
@@ -20,7 +20,7 @@ from app.domain.enums import AvlStatus, JobType, UploadKind
 from app.domain.permissions import P
 from app.domain.principal import Principal
 from app.modules.audit.service import record_audit
-from app.modules.equipment.mel import attribute_defs, field_labels, read_mel, sheet_infos
+from app.modules.equipment.mel import COMMERCIAL_HEADER, attribute_defs, field_labels, read_mel, sheet_infos
 from app.modules.equipment.models import (
     EquipmentAttribute,
     KnowledgeNote,
@@ -307,6 +307,12 @@ class EquipmentService:
         )
         if upload is None:
             raise NotFound("The source file is no longer stored")
+        if not self.principal.has(P.COMMERCIAL_READ) and await self.s.scalar(
+            select(MelRow.id)
+            .where(MelRow.upload_id == upload.id, MelRow.parsed["amount"].astext.is_not(None))
+            .limit(1)
+        ):
+            raise Forbidden("This file includes prices; downloading it needs access to commercial data")
         return upload
 
     async def update(self, equipment_id: uuid.UUID, body: EquipmentUpdate) -> ProjectEquipmentRead:
@@ -386,9 +392,20 @@ class EquipmentService:
             return or_(column == root, column.like(f"{root}.%"))
 
         matches: list[SimilarMatch] = []
+        closeness = (
+            case(
+                (EquipmentCategory.code == req.category_code, 0),
+                (EquipmentCategory.code.like(f"{req.category_code}.%"), 1),
+                (EquipmentCategory.code.like(f"{family or req.category_code}%"), 2),
+                else_=3,
+            )
+            if req.category_code
+            else literal(0)
+        )
         history = await self.s.execute(
             self._select()
             .where(ProjectEquipment.verification != "archived", in_family(EquipmentCategory.code))
+            .order_by(closeness, ProjectEquipment.created_at.desc(), ProjectEquipment.id)
             .limit(CANDIDATES)
         )
         records = history.all()
@@ -491,7 +508,13 @@ class EquipmentService:
                 pct, note = 0.0, "matches" if lo == hi else "within range"
             else:
                 edge = lo if target < lo else hi
-                pct = round((edge - target) / abs(target) * 100, 1) if target else 0.0
+                if not target:
+                    gap = edge - target
+                    diffs.append(AttributeDiff(key=key, requested=target, found=found, difference_pct=None,
+                                               note=f"{gap:+g} from the requested 0"))  # fmt: skip
+                    attr_scores.append(max(0.0, 1 - abs(gap) / max(abs(edge), 1.0)))
+                    continue
+                pct = round((edge - target) / abs(target) * 100, 1)
                 note = f"{'+' if pct > 0 else ''}{pct}% {'above' if pct > 0 else 'below'}"
             diffs.append(AttributeDiff(key=key, requested=target, found=found, difference_pct=pct, note=note))
             attr_scores.append(max(0.0, 1 - abs(pct) / 100))
@@ -541,6 +564,21 @@ class EquipmentService:
             if not points:
                 continue
             points.sort()
+            at = [p for p in points if p[0] == target]
+            if at:
+                d = defs.get(key)
+                out.append(
+                    Estimate(
+                        key=key,
+                        label=d.label if d else key,
+                        value=round(sum(p[1] for p in at) / len(at), 3),
+                        unit=d.unit if d else "",
+                        method="nearest",
+                        driver=driver,
+                        basis=[p[2] for p in at][:3],
+                    )
+                )
+                continue
             below = [p for p in points if p[0] <= target]
             above = [p for p in points if p[0] >= target]
             if below and above and below[-1][0] != above[0][0]:
@@ -593,6 +631,20 @@ class EquipmentService:
         rows = await self.s.execute(stmt.order_by(ProcurementRecord.po_date.desc().nulls_last()).limit(500))
         return [self._procurement_read(r, name) for r, name in rows.all()]
 
+    async def _check_refs(
+        self, project_id: uuid.UUID | None, equipment_id: uuid.UUID | None, vendor_id: uuid.UUID | None
+    ) -> None:
+        """References are checked here, under row-level security: a foreign key alone would accept another
+        organization's line (Postgres checks foreign keys without RLS)."""
+        if equipment_id:
+            line = await self.s.get(ProjectEquipment, equipment_id)
+            if line is None:
+                raise NotFound("Equipment not found")
+            if project_id and line.project_id != project_id:
+                raise ValidationFailed("That equipment line is not on this project")
+        if vendor_id and await self.s.get(Vendor, vendor_id) is None:
+            raise NotFound("Vendor not found")
+
     @staticmethod
     def _derive(r: ProcurementRecord) -> None:
         if r.lead_time_weeks is None and r.po_date and r.delivered_date:
@@ -602,6 +654,7 @@ class EquipmentService:
     async def create_procurement(self, body: ProcurementWrite) -> ProcurementRead:
         self._need(P.EQUIPMENT_MANAGE)
         project = await self._project(body.project_id)
+        await self._check_refs(body.project_id, body.equipment_id, body.vendor_id)
         r = ProcurementRecord(tenant_id=self.tenant_id, **body.model_dump())
         if r.currency:
             r.currency = r.currency.upper()
@@ -625,6 +678,8 @@ class EquipmentService:
         r = await self.s.get(ProcurementRecord, record_id)
         if r is None:
             raise NotFound("Procurement record not found")
+        await self._project(body.project_id)
+        await self._check_refs(body.project_id, body.equipment_id, body.vendor_id)
         data = body.model_dump()
         if not self.principal.has(P.COMMERCIAL_READ):
             data.pop("amount"), data.pop("currency")  # can't see them, so can't overwrite them
@@ -707,6 +762,7 @@ class EquipmentService:
             data["verification"] = "user_entered"
         if body.project_id:
             await self._project(body.project_id)
+        await self._check_refs(body.project_id, body.equipment_id, body.vendor_id)
         n = KnowledgeNote(
             tenant_id=self.tenant_id, category_id=await self._category_id(body.category_code), **data
         )
@@ -1038,6 +1094,21 @@ class EquipmentService:
         if status:
             stmt = stmt.where(MelRow.status == status)
         rows = await self.s.scalars(stmt.order_by(MelRow.row_number).limit(5000))
+        # Prices (PO value, quoted price) are commercial data: hidden without commercial:read, as elsewhere.
+        commercial = self.principal.has(P.COMMERCIAL_READ)
+
+        def raw(r: MelRow) -> dict[str, Any]:
+            return (
+                r.raw
+                if commercial
+                else {k: v for k, v in (r.raw or {}).items() if not COMMERCIAL_HEADER.search(k)}
+            )
+
+        def parsed(r: MelRow) -> dict[str, Any]:
+            if commercial:
+                return r.parsed
+            return {k: v for k, v in (r.parsed or {}).items() if k not in {"amount", "currency"}}
+
         return MelRows(
             upload_id=upload_id,
             project_id=uuid.UUID(upload.meta["project_id"]),
@@ -1047,8 +1118,8 @@ class EquipmentService:
                 MelRowRead(
                     id=r.id,
                     row_number=r.row_number,
-                    raw=r.raw,
-                    parsed=r.parsed,
+                    raw=raw(r),
+                    parsed=parsed(r),
                     issues=r.issues,
                     status=r.status,
                     equipment_id=r.equipment_id,

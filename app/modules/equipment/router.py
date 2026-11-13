@@ -4,6 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Response, UploadFile, status
 
 from app.api.deps import ContainerDep, PrincipalDep, SessionDep, require
+from app.api.files import attachment
 from app.core.exceptions import ValidationFailed
 from app.domain.enums import JobType
 from app.domain.permissions import P
@@ -88,7 +89,7 @@ async def equipment_source(equipment_id: uuid.UUID, _: Reader, svc: Svc) -> Resp
     return Response(
         content=upload.data,
         media_type=upload.content_type or "application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{upload.filename}"'},
+        headers=attachment(upload.filename),
     )
 
 

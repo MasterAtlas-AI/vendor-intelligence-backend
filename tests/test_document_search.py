@@ -80,3 +80,32 @@ async def test_document_text_search_and_ratings(client: AsyncClient, factory: Fa
     assert all(r["current"] == r["found"] for r in again["ratings"])
     hidden = await client.get(f"{API}/project-documents/{sheet['id']}/ratings", headers=outsider.headers)
     assert hidden.status_code == 404
+
+
+async def test_references_stay_in_the_organization_and_any_file_name_downloads(
+    client: AsyncClient, factory: Factory
+) -> None:
+    tag = uuid.uuid4().hex[:6]
+    tenant = await factory.tenant()
+    admin = await factory.user(tenant, ["tenant_admin"])
+    outsider = await factory.user(await factory.tenant(), ["tenant_admin"])
+    pid, line_id = await _project_with_line(client, admin.headers, tag)
+    their_pid, _ = await _project_with_line(client, outsider.headers, tag + "x")
+
+    # Another organization's equipment line can't be referenced (foreign keys alone ignore row-level security).
+    po = await client.post(f"{API}/procurement-records", headers=outsider.headers,
+                           json={"project_id": their_pid, "equipment_id": line_id, "po_number": "X"})  # fmt: skip
+    assert po.status_code == 404, po.text
+    note = await client.post(f"{API}/knowledge-notes", headers=outsider.headers,
+                             json={"project_id": their_pid, "equipment_id": line_id, "kind": "lesson_learned",
+                                   "title": "x", "body": "x"})  # fmt: skip
+    assert note.status_code == 404, note.text
+
+    # A file name outside Latin-1 (curly quotes, Cyrillic) still downloads.
+    quote = chr(0x2019)
+    name = f"Datenblatt {quote}Pumpe{quote} насос.pdf"
+    doc = await client.post(f"{API}/projects/{pid}/documents", headers=admin.headers,
+                            files={"file": (name, b"%PDF-1.4", "application/pdf")}, data={"doc_type": "datasheet"})  # fmt: skip
+    assert doc.status_code == 201, doc.text
+    got = await client.get(f"{API}/project-documents/{doc.json()['id']}/file", headers=admin.headers)
+    assert got.status_code == 200 and "filename*=UTF-8''" in got.headers["content-disposition"]

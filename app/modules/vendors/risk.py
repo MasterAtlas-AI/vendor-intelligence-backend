@@ -129,20 +129,26 @@ async def supplier_risk(
             add(vid, "expiring_certs", "Certificates expiring", f"{expiring} expire within {EXPIRING_DAYS} days "
                 f"(next {next_expiry.isoformat() if next_expiry else 'soon'})", 2)  # fmt: skip
 
-    # The organization's own orders and bid evaluations with the vendor.
+    # The organization's own orders, bid evaluations and equipment history: project-history data, so only for
+    # callers who may read it (an API key or role with vendor:read alone sees the certificate and data factors).
+    history = principal.has(P.EQUIPMENT_READ)
     orders = (
-        await session.execute(
-            select(
-                ProcurementRecord.vendor_id,
-                func.count().filter(ProcurementRecord.on_time.is_not(None)),
-                func.count().filter(ProcurementRecord.on_time.is_(False)),
-                func.avg(cast(ProcurementRecord.performance_rating, Float)),
-                func.count().filter(ProcurementRecord.technical_status == "rejected"),
+        (
+            await session.execute(
+                select(
+                    ProcurementRecord.vendor_id,
+                    func.count().filter(ProcurementRecord.on_time.is_not(None)),
+                    func.count().filter(ProcurementRecord.on_time.is_(False)),
+                    func.avg(cast(ProcurementRecord.performance_rating, Float)),
+                    func.count().filter(ProcurementRecord.technical_status == "rejected"),
+                )
+                .where(ProcurementRecord.vendor_id.in_(ids))
+                .group_by(ProcurementRecord.vendor_id)
             )
-            .where(ProcurementRecord.vendor_id.in_(ids))
-            .group_by(ProcurementRecord.vendor_id)
-        )
-    ).all()
+        ).all()
+        if history
+        else []
+    )
     for vid, timed, late, rating, rejected in orders:
         if timed and late:
             share = late / timed
@@ -159,7 +165,9 @@ async def supplier_risk(
     # Dependence: one vendor behind a large share of the organization's equipment lines.
     supplier = case((ProjectEquipment.vendor_id.is_not(None), ProjectEquipment.vendor_id),
                     else_=ProjectEquipment.manufacturer_id)  # fmt: skip
-    lines_total = await session.scalar(select(func.count()).select_from(ProjectEquipment)) or 0
+    lines_total = (
+        (await session.scalar(select(func.count()).select_from(ProjectEquipment)) or 0) if history else 0
+    )
     if lines_total:
         rows = await session.execute(
             select(supplier, func.count())
