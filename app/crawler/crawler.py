@@ -17,13 +17,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import undefer
 
 from app.ai.guards import sanitise
 from app.core.config import Settings
 from app.core.exceptions import ValidationFailed
+from app.core.ids import uuid7
+from app.core.text import strip_nul
 from app.crawler.fetcher import Fetcher, FetchResult
 from app.crawler.html_text import html_to_text
 from app.crawler.models import WebPage
@@ -198,10 +200,6 @@ class Crawler:
             return
         now = datetime.now(UTC)
         async with open_session(self.sessionmaker, TenantContext.platform()) as s:
-            row = await s.scalar(select(WebPage).where(WebPage.url == page.url).options(undefer(WebPage.raw)))
-            if row is None:
-                row = WebPage(url=page.url, links=[], text="")
-                s.add(row)
             values: dict[str, Any] = {
                 "final_url": page.final_url, "domain": registrable_domain(page.final_url), "status": page.status,
                 "content_type": page.content_type[:100], "title": page.title[:300],
@@ -212,8 +210,15 @@ class Crawler:
                 "changed_at": now if page.changed else (previous.changed_at if previous else now),
                 "raw": page.pdf_bytes,
             }  # fmt: skip
-            for key, value in values.items():
-                setattr(row, key, value)
+            values = strip_nul(values)  # Postgres text and jsonb can't hold NUL characters
+            # One statement, insert or update: two look-ups fetching the same page at once (a parallel run) must
+            # not collide on the unique URL.
+            stmt = pg_insert(WebPage).values(id=uuid7(), url=page.url, **values)
+            await s.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[WebPage.url], set_={**values, "updated_at": func.now()}
+                )
+            )
             await s.commit()
 
     async def _touch(self, url: str) -> None:

@@ -55,3 +55,31 @@ async def test_page_cache_reuse_revalidation_and_change_detection(container: Con
         row = await s.scalar(select(WebPage).where(WebPage.url == url))
         assert row is not None and row.domain == DNS_HOST and row.etag == '"v2"' and "BB5" in row.text
         assert row.changed_at is not None and row.changed_at >= row.created_at
+
+
+async def test_two_fetches_of_one_page_at_once_share_the_cache(container: Container) -> None:
+    """Parallel look-ups often reach the same page (a directory, a group site) at the same moment: both store it
+    without colliding on the unique URL, and the page holds no NUL characters Postgres would refuse."""
+    import asyncio
+
+    from app.crawler.fetcher import Fetcher
+
+    url = f"https://{DNS_HOST}/same/{uuid.uuid4().hex[:8]}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return httpx.Response(200, headers={"content-type": "text/html"},
+                              text="<html><title>Fjord Pumps</title><body><p>R\x00e9sidence pumps</p></body></html>")  # fmt: skip
+
+    def crawler() -> Crawler:
+        clock = FakeClock()
+        fetcher = Fetcher(settings(), client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                          resolve=resolve, clock=clock, sleep=clock.sleep)  # fmt: skip
+        return Crawler(fetcher, settings(), container.sessionmaker)
+
+    pages = await asyncio.gather(*(crawler().page(url) for _ in range(4)))
+    assert all(p.ok for p in pages)
+    async with open_session(container.sessionmaker, TenantContext.platform()) as s:
+        rows = list(await s.scalars(select(WebPage).where(WebPage.url == url)))
+    assert len(rows) == 1 and "\x00" not in rows[0].text

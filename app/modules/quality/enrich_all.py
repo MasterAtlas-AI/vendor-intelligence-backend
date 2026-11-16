@@ -19,18 +19,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.models import AiUsageEvent
 from app.ai.service import AINotAvailable, BudgetExceeded, CallContext
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.domain.enums import VendorStatus
 from app.modules.jobs.models import Job
 from app.modules.quality.lookup import (
     DESCRIPTION_LENGTH,
     STATUSES,
     Field_,
+    LookupRow,
     estimate_usd,
     lookup_vendors,
 )
 from app.modules.quality.service import _CHECKS
 from app.modules.vendors.models import Vendor, VendorContact, VendorDomain
-from app.workers.runner import JobCancelled, JobContext
+from app.workers.runner import JobCancelled, JobContext, JobLeaseLost
+
+log = get_logger(__name__)
 
 EnrichField = Literal["website", "hq_country", "description", "contacts"]
 # Websites first: contact details are read from the vendor's own site.
@@ -41,10 +45,8 @@ LABELS = {
     "description": "Descriptions",
     "contacts": "Contact details",
 }
-MAX_ROWS_KEPT = 20_000
-PUBLISH_SECONDS = (
-    3  # live progress at most this often  # rows kept in the job result (one per vendor and field)
-)
+MAX_ROWS_KEPT = 20_000  # rows kept in the job result (one per vendor and field)
+PUBLISH_SECONDS = 3  # live progress at most this often
 
 
 def _needs(field: str, r: Any) -> bool:
@@ -137,6 +139,12 @@ async def vendor_enrich_all_handler(ctx: JobContext) -> dict[str, Any]:
     async with ctx.session() as s:
         previous = (await s.get(Job, ctx.job_id)).result or {}  # type: ignore[union-attr]
         todo = await candidates_all(s, fields, skip_checked, only)
+        wanted = {v for ids in todo.values() for v in ids}
+        names = (
+            dict((await s.execute(select(Vendor.id, Vendor.display_name).where(Vendor.id.in_(wanted)))).all())
+            if wanted
+            else {}
+        )
     rows: list[dict[str, Any]] = list(previous.get("rows") or [])
     done_pairs = {(r["vendor_id"], r["field"]) for r in rows}
     for f in fields:
@@ -210,6 +218,12 @@ async def vendor_enrich_all_handler(ctx: JobContext) -> dict[str, Any]:
             except BudgetExceeded:
                 stopped = "budget"
                 return
+            except (JobCancelled, JobLeaseLost, asyncio.CancelledError):
+                raise
+            except Exception as exc:  # one vendor's look-up going wrong must not end the whole run
+                log.warning("enrich_all.lookup_failed", vendor_id=str(vid), field=f, error=str(exc)[:300])
+                found = [LookupRow(vendor_id=vid, name=names.get(vid, ""), status="failed",
+                                   reason=f"Look-up failed: {type(exc).__name__}: {str(exc)[:150]}")]  # fmt: skip
             finally:
                 in_flight -= 1
             since_spent += 1
