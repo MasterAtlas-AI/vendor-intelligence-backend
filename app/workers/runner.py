@@ -71,8 +71,9 @@ class JobContext:
         ctx = TenantContext(self.tenant_id) if self.tenant_id else TenantContext.platform()
         return open_session(self._runner.sessionmaker, ctx, self.user_id)
 
-    async def progress(self, stage: str, progress: int) -> None:
-        """Record progress (shown live via SSE). Raises JobCancelled if the user cancelled the job."""
+    async def progress(self, stage: str, progress: int, result: dict[str, Any] | None = None) -> None:
+        """Record progress (shown live via SSE). Raises JobCancelled if the user cancelled the job. `result`
+        publishes partial results while the job runs (kept if it is cancelled; replaced when it finishes)."""
         # FOR NO KEY UPDATE, not FOR UPDATE: the handler's own open transaction holds FOR KEY SHARE on this row
         # as soon as it inserts rows referencing the job (e.g. import_rows.job_id), and FOR UPDATE would wait on
         # it forever while the handler waits on us.
@@ -84,6 +85,8 @@ class JobContext:
                 raise JobCancelled
             job.stage = stage
             job.progress = max(0, min(100, progress))
+            if result is not None:
+                job.result = result
             await s.commit()
 
 
@@ -110,6 +113,7 @@ _CLAIM_SQL = text(
      WHERE id = (
             SELECT id FROM jobs
              WHERE NOT cancel_requested
+               AND type = ANY(:types)
                AND ((status = 'queued' AND run_after <= now())
                     OR (status = 'running' AND locked_until < now() AND attempts < max_attempts))
              ORDER BY created_at
@@ -212,7 +216,16 @@ class JobRunner:
         async with open_session(self.sessionmaker, TenantContext.platform()) as s:
             await s.execute(_REAP_SQL)
             job_id = (
-                await s.execute(_CLAIM_SQL, {"worker": self.worker_id, "lease": self._s.job_lease_seconds})
+                await s.execute(
+                    _CLAIM_SQL,
+                    # Only job types this runner can handle: during a rolling deploy an older worker leaves a new
+                    # kind of job to a newer one instead of failing it.
+                    {
+                        "worker": self.worker_id,
+                        "lease": self._s.job_lease_seconds,
+                        "types": list(self._handlers),
+                    },
+                )
             ).scalar()
             await s.commit()
         if job_id is not None:

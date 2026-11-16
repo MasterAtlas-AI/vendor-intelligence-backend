@@ -89,10 +89,12 @@ ISSUE_CHECK = {"no_website": "website", "no_country": "hq_country", "no_descript
 # Every AI check run on a vendor, from the jobs that ran them: web look-ups (one row per vendor in the job's result)
 # and website research. Read from jobs, so the history needs no table of its own.
 _CHECKS = """
-SELECT (r->>'vendor_id')::uuid AS vendor_id, coalesce(j.result->>'field', j.input->>'field', 'website') AS field,
-       r->>'status' AS status, coalesce(j.finished_at, j.created_at) AS at
+SELECT (r->>'vendor_id')::uuid AS vendor_id,
+       coalesce(r->>'field', j.result->>'field', j.input->>'field', 'website') AS field,
+       r->>'status' AS status, coalesce(j.finished_at, j.updated_at, j.created_at) AS at
 FROM jobs j CROSS JOIN LATERAL jsonb_array_elements(coalesce(j.result->'rows', '[]'::jsonb)) r
-WHERE j.type IN ('vendor_lookup', 'website_lookup') AND j.status = 'succeeded'
+WHERE (j.type IN ('vendor_lookup', 'website_lookup') AND j.status = 'succeeded')
+   OR j.type = 'vendor_enrich_all'
 UNION ALL
 SELECT (j.input->>'vendor_id')::uuid, 'research',
        CASE WHEN j.status = 'succeeded' THEN coalesce(j.result->>'outcome', 'done') ELSE j.status::text END,

@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     ai_price_cached_input_per_mtok: float = 0.025
     ai_price_output_per_mtok: float = 2.00
     ai_price_per_web_search: float = 0.01
+    ai_enrich_parallel: int = 10  # look-ups running at once in a whole-knowledge-base AI run
     # Embeddings (Phase 4 search). The dimension is fixed by the vendor_embeddings column (migration 0014).
     openai_embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536

@@ -65,6 +65,7 @@ class JobType(StrEnum):
     VENDOR_LOOKUP = "vendor_lookup"
     PRODUCT_CATALOG = "product_catalog"
     MEL_IMPORT = "mel_import"
+    VENDOR_ENRICH_ALL = "vendor_enrich_all"  # AI on the whole knowledge base (quality/enrich_all.py)
 
 
 # ---------------------------------------------------------------- knowledge base (Phase 2)

@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.ai.service import AINotAvailable, CallContext
 from app.api.deps import ContainerDep, SessionDep, require
+from app.core.exceptions import Conflict, ValidationFailed
 from app.db.session import open_session
 from app.discovery.capabilities import CapabilityRequest
 from app.domain.enums import JobStatus, JobType
@@ -16,6 +17,7 @@ from app.domain.permissions import P
 from app.domain.principal import Principal, TenantContext
 from app.modules.discovery.router import _start_capability_job
 from app.modules.jobs.service import JobService
+from app.modules.quality.enrich_all import ORDER, EnrichField, estimate, plan
 from app.modules.quality.lookup import MAX_VENDORS, Field_, estimate_usd
 from app.modules.quality.service import ISSUES, dashboard, rescore, researching, stale_with_website
 from app.modules.vendors.models import Vendor
@@ -125,6 +127,107 @@ class LookupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     vendor_ids: list[uuid.UUID] = Field(min_length=1, max_length=MAX_VENDORS)
     field: Field_ = "website"
+
+
+class EnrichPlan(BaseModel):
+    planned: dict[str, int]  # vendors each field would look up
+    estimated_cost_usd: float
+    budget_limit_usd: float
+    budget_remaining_usd: float
+    running_job_id: uuid.UUID | None  # a run in progress (only one at a time)
+    last_job_id: uuid.UUID | None  # the latest run, finished or not
+
+
+class EnrichRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fields: list[EnrichField] = Field(min_length=1)
+    skip_checked: bool = True
+    max_usd: float = Field(gt=0, le=10_000, description="Stop before spending more than this (US$)")
+    vendor_ids: list[uuid.UUID] | None = Field(
+        default=None, max_length=5000, description="Only these vendors"
+    )
+
+
+class EnrichAccepted(BaseModel):
+    job_id: uuid.UUID
+    planned: dict[str, int]
+    estimated_cost_usd: float
+
+
+async def _enrich_jobs(session: SessionDep) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    from app.modules.jobs.models import Job
+
+    latest = (
+        await session.execute(
+            select(Job.id, Job.status)
+            .where(Job.type == JobType.VENDOR_ENRICH_ALL)
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if latest is None:
+        return None, None
+    running = latest[0] if latest[1] in (JobStatus.QUEUED, JobStatus.RUNNING) else None
+    return running, latest[0]
+
+
+@router.get("/admin/vendor-enrichment", response_model=EnrichPlan)
+async def enrichment_plan(
+    principal: Curator,
+    session: SessionDep,
+    c: ContainerDep,
+    skip_checked: bool = True,
+) -> EnrichPlan:
+    """What a run on the whole knowledge base would do: vendors per field still missing it (and, by default, not
+    yet checked by the AI), the cost estimate and the AI budget left this month; plus the current or last run."""
+    async with open_session(c.sessionmaker, TenantContext.platform()) as s:
+        planned = await plan(s, list(ORDER), skip_checked)
+    budget = await c.ai.budget(principal.tenant_id)  # the budget the run will spend from
+    running, last = await _enrich_jobs(session)
+    return EnrichPlan(
+        planned=planned,
+        estimated_cost_usd=float(estimate(planned, c.settings)),
+        budget_limit_usd=float(budget.limit_usd),
+        budget_remaining_usd=float(budget.remaining_usd),
+        running_job_id=running,
+        last_job_id=last,
+    )
+
+
+@router.post("/admin/vendor-enrichment", response_model=EnrichAccepted, status_code=status.HTTP_202_ACCEPTED)
+async def start_enrichment(
+    body: EnrichRequest, principal: Curator, session: SessionDep, c: ContainerDep
+) -> EnrichAccepted:
+    """Runs AI on every vendor missing the chosen fields, as one background job (see GET /jobs/{id} for its live
+    progress and partial results; POST /jobs/{id}/cancel stops it and keeps what was done). Answers wait in
+    Approvals. It stops by itself at `max_usd` or when the AI budget is used up."""
+    if not c.ai.configured:
+        raise AINotAvailable("AI is not configured on this server (set OPENAI_API_KEY)")
+    running, _ = await _enrich_jobs(session)
+    if running:
+        raise Conflict("A run on the whole knowledge base is already in progress; stop it or wait for it to finish",
+                       code="already_running")  # fmt: skip
+    fields = [f for f in ORDER if f in body.fields]
+    async with open_session(c.sessionmaker, TenantContext.platform()) as s:
+        planned = await plan(s, fields, body.skip_checked, body.vendor_ids)
+    if not sum(planned.values()):
+        raise ValidationFailed("Nothing to look up: every vendor has these details or was already checked")
+    await c.ai.ensure_budget(
+        CallContext(principal.tenant_id), estimate_usd(min(sum(planned.values()), MAX_VENDORS), c.settings)
+    )
+    job = await JobService(session, principal, c.job_runner.notify).create(
+        JobType.VENDOR_ENRICH_ALL,
+        {
+            "fields": fields,
+            "skip_checked": body.skip_checked,
+            "max_usd": body.max_usd,
+            "vendor_ids": [str(v) for v in body.vendor_ids] if body.vendor_ids else None,
+        },
+        None,
+    )
+    return EnrichAccepted(
+        job_id=job.id, planned=planned, estimated_cost_usd=float(estimate(planned, c.settings))
+    )
 
 
 class LookupAccepted(BaseModel):

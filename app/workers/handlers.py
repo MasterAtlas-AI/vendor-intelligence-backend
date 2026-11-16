@@ -11,6 +11,7 @@ from app.discovery.products import product_catalog_handler
 from app.domain.enums import JobType
 from app.modules.equipment.mel import mel_import_handler
 from app.modules.imports.job import excel_import_handler, pdf_import_handler
+from app.modules.quality.enrich_all import vendor_enrich_all_handler
 from app.modules.quality.lookup import vendor_lookup_handler
 from app.modules.reports.service import report_handler
 from app.modules.search.indexing import embedding_handler
@@ -50,4 +51,5 @@ HANDLERS: dict[str, Handler] = {
     JobType.VENDOR_LOOKUP: vendor_lookup_handler,
     JobType.PRODUCT_CATALOG: product_catalog_handler,
     JobType.MEL_IMPORT: mel_import_handler,
+    JobType.VENDOR_ENRICH_ALL: vendor_enrich_all_handler,
 }

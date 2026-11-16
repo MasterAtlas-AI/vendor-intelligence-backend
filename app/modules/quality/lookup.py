@@ -691,6 +691,23 @@ async def vendor_lookup_handler(ctx: JobContext) -> dict[str, Any]:
     ids = [uuid.UUID(v) for v in ctx.input["vendor_ids"]][:MAX_VENDORS]
     call = CallContext(ctx.tenant_id, ctx.user_id, ctx.job_id)
 
+    async def progress(done: int, total: int) -> None:
+        await ctx.progress("searching", 5 + int(85 * done / max(total, 1)))
+
+    rows = await lookup_vendors(field, ids, ctx, call, progress)
+    counts = {st: sum(1 for r in rows if r.status == st) for st in STATUSES}
+    return {"field": field, "counts": counts, "rows": [r.model_dump(mode="json") for r in rows]}
+
+
+Progress = Callable[[int, int], Awaitable[None]]
+
+
+async def lookup_vendors(
+    field: Field_, ids: list[uuid.UUID], ctx: JobContext, call: CallContext, progress: Progress | None = None
+) -> list[LookupRow]:
+    """Looks one field up for up to MAX_VENDORS vendors: skips those that have it, asks the AI for the rest, checks
+    the answers and submits the ones that hold up as proposals. One row per vendor, in the order of `ids`."""
+    ids = ids[:MAX_VENDORS]
     async with ctx.session() as s:
         vendors = list(await s.scalars(select(Vendor).where(Vendor.id.in_(ids))))
         with_contacts = set(
@@ -737,7 +754,8 @@ async def vendor_lookup_handler(ctx: JobContext) -> dict[str, Any]:
             targets.append({"id": v.id, "name": v.display_name, "current": profile, "certificate_numbers": numbers,
                             "profile": {k: x for k, x in profile.items() if x}})  # fmt: skip
 
-    await ctx.progress("searching", 5)
+    if progress:
+        await progress(0, len(targets))
     sem = asyncio.Semaphore(CONCURRENCY)
     done = 0
     accepted: list[tuple[LookupRow, Accepted]] = []
@@ -750,13 +768,13 @@ async def vendor_lookup_handler(ctx: JobContext) -> dict[str, Any]:
         if ok:
             accepted.append((row, ok))
         done += 1
-        await ctx.progress("searching", 5 + int(85 * done / max(len(targets), 1)))
+        if progress:
+            await progress(done, len(targets))
 
     await asyncio.gather(*(one(v) for v in targets))
     if field == "website":
         accepted = _drop_shared_domains(accepted)
 
-    await ctx.progress("proposing", 92)
     label = LOOKUPS[field][3]
     async with ctx.session() as s:
         proposals = ProposalService(s, None)
@@ -776,5 +794,4 @@ async def vendor_lookup_handler(ctx: JobContext) -> dict[str, Any]:
 
     order = {v: i for i, v in enumerate(ids)}
     rows.sort(key=lambda r: order.get(r.vendor_id, len(order)))
-    counts = {st: sum(1 for r in rows if r.status == st) for st in STATUSES}
-    return {"field": field, "counts": counts, "rows": [r.model_dump(mode="json") for r in rows]}
+    return rows
