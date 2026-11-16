@@ -8,7 +8,7 @@ import asyncio
 import random
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, TypeVar
@@ -26,6 +26,7 @@ from app.ai.prompts import Prompt
 from app.core.config import Settings
 from app.core.exceptions import AppError, problem_response
 from app.core.logging import get_logger
+from app.core.text import strip_nul
 from app.db.session import open_session
 from app.domain.principal import TenantContext
 from app.modules.jobs.models import Job
@@ -185,6 +186,11 @@ class AiService:
                 await self.record(prompt, exc.usage, ctx, outcome="error")
             raise
         await self.record(prompt, result.usage, ctx)
+        # A NUL in the answer (a garbled accent, say) can't be stored in Postgres: drop it before anyone saves it.
+        dumped = result.output.model_dump()
+        cleaned = strip_nul(dumped)
+        if cleaned != dumped:
+            result = replace(result, output=type(result.output).model_validate(cleaned))
         return result
 
     async def embed(self, texts: list[str], ctx: CallContext, purpose: str = "search") -> list[list[float]]:

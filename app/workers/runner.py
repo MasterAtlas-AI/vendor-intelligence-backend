@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.core.text import strip_nul
 from app.db.session import open_session
 from app.domain.enums import JobStatus
 from app.domain.principal import TenantContext
@@ -86,7 +87,7 @@ class JobContext:
             job.stage = stage
             job.progress = max(0, min(100, progress))
             if result is not None:
-                job.result = result
+                job.result = strip_nul(result)  # Postgres jsonb can't hold NUL characters
             await s.commit()
 
 
@@ -285,7 +286,7 @@ class JobRunner:
                 log.warning("job.result_discarded", job_id=str(job_id), reason="lease no longer held")
                 return
             for key, value in outcome.items():
-                setattr(job, key, value)
+                setattr(job, key, strip_nul(value))  # Postgres jsonb can't hold NUL characters
             job.locked_by = None
             job.locked_until = None
             job.finished_at = datetime.now(UTC)
