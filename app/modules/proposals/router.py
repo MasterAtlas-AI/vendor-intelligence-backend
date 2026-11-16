@@ -72,9 +72,15 @@ async def list_proposals(
     origin: ProposalOrigin | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
     cursor: str | None = None,
+    offset: Annotated[
+        int | None, Query(ge=0, description="Numbered pages: skip this many (returns `total`)")
+    ] = None,
 ) -> ProposalPage:
-    rows, nxt = await svc.list_page(status=status_, kind=kind, origin=origin, limit=limit, cursor=cursor)
-    return ProposalPage(items=[summarize(p) for p in rows], next_cursor=nxt, has_more=nxt is not None)
+    rows, nxt, total = await svc.list_page(
+        status=status_, kind=kind, origin=origin, limit=limit, cursor=cursor, offset=offset
+    )
+    more = nxt is not None if offset is None else offset + len(rows) < (total or 0)
+    return ProposalPage(items=[summarize(p) for p in rows], next_cursor=nxt, has_more=more, total=total)
 
 
 @router.post("/admin/proposals", response_model=ProposalDetail, status_code=status.HTTP_201_CREATED)
@@ -180,7 +186,9 @@ async def decide_in_bulk(body: BulkDecision, principal: Curator, svc: Svc, c: Co
     for target in body.proposals:
         try:
             if body.action == "approve":
-                proposal = await svc.approve(target.id, None, body.note, target.version)
+                proposal = await svc.approve(
+                    target.id, None, body.note, target.version, shared_websites=body.shared_websites
+                )
                 approved.append(Approved.of(proposal))
             else:
                 proposal = await svc.reject(target.id, None, body.note, target.version)
@@ -222,7 +230,7 @@ async def my_proposals(
     """Proposals that came from your organization (imports, suggestions), with their review status."""
     if principal.tenant_id is None:
         raise Forbidden("No tenant selected", code="tenant_required")
-    rows, nxt = await svc.list_page(
+    rows, nxt, _ = await svc.list_page(
         status=status_,
         kind=None,
         origin=None,

@@ -220,6 +220,7 @@ class VendorQueryService:
         has_more = len(rows) > limit
         rows = rows[:limit]
         overlays = await self._overlays([r[0].id for r in rows])
+        emails = await self._emails([r[0].id for r in rows])
         items = [
             VendorSummary(
                 id=v.id,
@@ -232,6 +233,7 @@ class VendorQueryService:
                 equipment_count=eq,
                 service_count=sv,
                 certification_count=ct,
+                email=emails.get(v.id),
                 tenant=overlays.get(v.id),
             )
             for v, eq, sv, ct in rows
@@ -242,6 +244,24 @@ class VendorQueryService:
     async def count(self, f: VendorFilters) -> int:
         """How many vendors match the filters (numbered pages)."""
         return int(await self.s.scalar(select(func.count()).select_from(self._filtered(f).subquery())) or 0)
+
+    async def _emails(self, vendor_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """Each vendor's main email: an approved contact, the sales or procurement address before the general one."""
+        if not vendor_ids:
+            return {}
+        rank = {"sales": 0, "procurement": 1, "general": 2, "agent": 4}
+        best: dict[uuid.UUID, tuple[int, str]] = {}
+        for vid, kind, email in await self.s.execute(
+            select(VendorContact.vendor_id, VendorContact.contact_type, VendorContact.email).where(
+                VendorContact.vendor_id.in_(vendor_ids),
+                VendorContact.email.is_not(None),
+                VendorContact.status == FactStatus.APPROVED,
+            )
+        ):
+            r = rank.get(kind, 3)
+            if email and (vid not in best or r < best[vid][0]):
+                best[vid] = (r, email)
+        return {vid: email for vid, (_, email) in best.items()}
 
     async def _overlays(self, vendor_ids: list[uuid.UUID]) -> dict[uuid.UUID, TenantOverlayRead]:
         if not vendor_ids or self.principal.tenant_id is None:

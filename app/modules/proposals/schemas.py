@@ -89,6 +89,8 @@ class BulkDecision(BaseModel):
     action: Literal["approve", "reject"]
     proposals: list[BulkTarget] = Field(min_length=1, max_length=100)
     note: str = Field(default="", max_length=2000, description="Required when rejecting")
+    # Approve: a website another vendor already owns is saved as a group website (shared by group companies).
+    shared_websites: bool = False
 
 
 class BulkOutcome(BaseModel):
@@ -145,3 +147,4 @@ class ProposalPage(BaseModel):
     items: list[ProposalSummary]
     next_cursor: str | None
     has_more: bool
+    total: int | None = None  # with `offset` (numbered pages): proposals matching the filters

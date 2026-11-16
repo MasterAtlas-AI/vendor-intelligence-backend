@@ -73,3 +73,6 @@ class RfqVendor(Entity, TenantScoped, Base):
     lead_time_weeks: Mapped[int | None] = mapped_column(Integer)
     quote_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str] = mapped_column(Text, default="")
+    # The RFQ e-mailed to the vendor from the app: when, and to which address (the latest send).
+    emailed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    emailed_to: Mapped[str | None] = mapped_column(String(254))

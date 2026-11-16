@@ -15,7 +15,10 @@ log = get_logger(__name__)
 class OutgoingEmail:
     to: str
     subject: str
-    body: str
+    body: str  # plain text (always sent)
+    html: str | None = None  # an HTML version shown by most mail programs
+    reply_to: str | None = None  # where the recipient's reply goes (e.g. the buyer who sent an RFQ)
+    strict: bool = False  # raise on a delivery failure instead of only logging it (the caller reports it)
 
 
 class EmailSender(Protocol):
@@ -38,7 +41,11 @@ class SmtpEmailSender:
         msg["From"] = self._s.smtp_from
         msg["To"] = message.to
         msg["Subject"] = message.subject
+        if message.reply_to:
+            msg["Reply-To"] = message.reply_to
         msg.set_content(message.body)
+        if message.html:
+            msg.add_alternative(message.html, subtype="html")
         with smtplib.SMTP(self._s.smtp_host, self._s.smtp_port, timeout=10) as smtp:
             if self._s.smtp_starttls:
                 smtp.starttls()
@@ -50,8 +57,11 @@ class SmtpEmailSender:
         try:
             await anyio.to_thread.run_sync(self._send_sync, message)
         except (OSError, smtplib.SMTPException):
-            # Delivery failures must not fail the request (e.g. an invite is still created and can be resent).
+            # Delivery failures must not fail the request (e.g. an invite is still created and can be resent),
+            # unless the caller reports them itself.
             log.exception("email.send_failed", to=message.to, subject=message.subject)
+            if message.strict:
+                raise
 
 
 def build_email_sender(settings: Settings) -> EmailSender:

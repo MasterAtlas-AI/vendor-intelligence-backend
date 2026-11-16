@@ -9,7 +9,7 @@ from httpx import AsyncClient
 from openpyxl import load_workbook
 
 from app.core.container import Container
-from app.modules.reports.render import ReportData, Table, to_pdf
+from app.modules.reports.render import ReportData, Table, _logo, to_pdf
 from tests.conftest import Factory
 from tests.test_imports import _drain
 from tests.test_search import _eq, _vendor
@@ -21,6 +21,15 @@ def test_pdf_handles_text_outside_latin1() -> None:
     pdf = to_pdf(ReportData("Test", facts=[("Vendors", "1")],
                             tables=[Table("Vendors", ["Name"], [["北京 Pumps / Svanehøj"]])]))  # fmt: skip
     assert pdf.startswith(b"%PDF")
+
+
+def test_pdf_logo_only_for_its_own_organization() -> None:
+    """An organization's logo file goes on its own reports only; others (and odd slugs) get the text wordmark."""
+    assert _logo("spog") is not None
+    assert _logo("someone-else") is None and _logo("../logos/spog") is None and _logo("") is None
+    own = to_pdf(ReportData("Test", organization="SPE", organization_slug="spog"))
+    other = to_pdf(ReportData("Test", organization="Other", organization_slug="someone-else"))
+    assert b"/Subtype /Image" in own and b"/Subtype /Image" not in other
 
 
 async def _generate(

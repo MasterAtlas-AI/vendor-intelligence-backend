@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     smtp_password: SecretStr | None = None
     smtp_starttls: bool = False
     smtp_from: str = "MasterAtlas AI <no-reply@masteratlas.local>"
+    # Testing only: RFQ e-mails for vendors with no address on record go here instead (subject marked "[TEST for
+    # <vendor>]"). Leave empty in production so such vendors are skipped.
+    rfq_test_recipient: str | None = None
 
     @property
     def is_production(self) -> bool:

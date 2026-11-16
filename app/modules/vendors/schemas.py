@@ -30,6 +30,9 @@ class VendorSummary(BaseModel):
     equipment_count: int
     service_count: int
     certification_count: int
+    email: str | None = (
+        None  # the company's main email (sales / procurement first), from its approved contacts
+    )
     tenant: TenantOverlayRead | None = None
 
 

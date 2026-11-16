@@ -62,3 +62,33 @@ async def test_bulk_decisions(client: AsyncClient, factory: Factory, container: 
     resp = await client.post(f"{API}/admin/proposals/bulk", json={**reject, "note": "Parent group's site"},
                              headers=curator.headers)  # fmt: skip
     assert resp.json()["done"] == 1 and resp.json()["results"][0]["status"] == "rejected"
+
+
+async def test_bulk_save_as_group_websites(
+    client: AsyncClient, factory: Factory, container: Container
+) -> None:
+    """A website another vendor owns (group companies on the parent's site) is refused by a plain approval and
+    saved as a shared group website with `shared_websites`; the owner keeps its domain."""
+    curator = await factory.user(None, platform_roles=["curator"])
+    tag = uuid.uuid4().hex[:6]
+    owner = await _existing_vendor(container, f"Group Parent {tag}", f"group-{tag}-maitest.com")
+    child = await _vendor(container, f"Group Child {tag}", "SG", [])
+    p = await _website_proposal(client, curator.headers, child, f"https://group-{tag}-maitest.com")
+    url = f"{API}/admin/proposals/bulk"
+
+    refused = (await client.post(url, headers=curator.headers, json={
+        "action": "approve", "proposals": [{"id": p["id"], "version": p["version"]}],
+    })).json()  # fmt: skip
+    assert refused["failed"] == 1 and "already belongs to" in refused["results"][0]["error"]
+
+    shared = (await client.post(url, headers=curator.headers, json={
+        "action": "approve", "shared_websites": True, "proposals": [{"id": p["id"], "version": p["version"]}],
+    })).json()  # fmt: skip
+    assert shared["done"] == 1, shared
+    child_v = (await client.get(f"{API}/vendors/{child}", headers=curator.headers)).json()
+    owner_v = (await client.get(f"{API}/vendors/{owner}", headers=curator.headers)).json()
+    assert child_v["website"] == f"https://group-{tag}-maitest.com"
+    assert (
+        f"group-{tag}-maitest.com" in owner_v["domains"]
+        and f"group-{tag}-maitest.com" not in child_v["domains"]
+    )

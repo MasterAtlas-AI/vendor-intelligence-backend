@@ -17,6 +17,7 @@ from app.modules.jobs.service import JobService
 from app.modules.reports.builders import BUILDERS, TITLES
 from app.modules.reports.models import Report
 from app.modules.reports.render import to_pdf, to_xlsx
+from app.modules.tenants.models import Tenant
 from app.workers.runner import JobContext
 
 CONTENT_TYPES = {
@@ -85,6 +86,10 @@ async def report_handler(ctx: JobContext) -> dict[str, Any]:
             await s.commit()
             return {"report_id": str(report.id), "status": "failed", "error": report.error}
         await ctx.progress("rendering", 70)
+        data.kind = TITLES[report.report_type]
+        tenant = await s.get(Tenant, report.tenant_id)
+        data.organization = tenant.name if tenant else ""
+        data.organization_slug = str(tenant.slug).lower() if tenant else ""
         content = to_pdf(data) if report.format == "pdf" else to_xlsx(data)
         report.title = data.title[:200]
         report.filename = filename_for(data.title, report.format)

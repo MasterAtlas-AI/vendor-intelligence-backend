@@ -108,3 +108,38 @@ class RfqVendorRead(BaseModel):
     notes: str
     scorecard_id: uuid.UUID | None = None  # the vendor's latest scorecard on the RFQ's project
     score: Decimal | None = None
+    emailed_at: datetime | None = None  # the RFQ was e-mailed to the vendor from the app (latest send)
+    emailed_to: str | None = None
+    test_recipient: str | None = None  # testing: where an RFQ e-mail goes when the vendor has no address
+
+
+class EmailRecipient(BaseModel):
+    vendor_id: uuid.UUID
+    name: str
+    email: str | None  # where the RFQ goes: the vendor's main company email, or the test address (see below)
+    test_address: bool = False  # the vendor has no email; the server's test address receives it instead
+    status: RfqVendorStatus
+    emailed_at: datetime | None
+
+
+class EmailPreview(BaseModel):
+    configured: bool  # the server can send e-mail (SMTP set up); otherwise messages are only logged
+    sender: str  # the From address vendors see
+    reply_to: str | None  # replies go to the user sending the RFQ
+    subject: str
+    body: str  # plain text of the message (the note is added where it says so)
+    recipients: list[EmailRecipient]
+
+
+class EmailSend(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    vendor_ids: list[uuid.UUID] = Field(min_length=1, max_length=50)
+    note: str = Field(default="", max_length=3000)  # a personal message above the RFQ details
+    test_to_me: bool = False  # send one copy to the sender's own address instead of the vendors
+
+
+class EmailSendResult(BaseModel):
+    sent: list[str]  # addresses the RFQ went to
+    skipped: list[str]  # vendors with no email, with the reason
+    failed: list[str]  # addresses the mail server refused
+    issued: bool  # a draft RFQ was issued by the send (vendors became invited)

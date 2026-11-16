@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import Conflict, NotFound, ValidationFailed, VersionConflict
@@ -168,7 +168,10 @@ class ProposalService:
         origin_tenant_id: uuid.UUID | None = None,
         limit: int,
         cursor: str | None,
-    ) -> tuple[list[KnowledgeProposal], str | None]:
+        offset: int | None = None,
+    ) -> tuple[list[KnowledgeProposal], str | None, int | None]:
+        """Newest first. With `offset`: one numbered page plus the total (for page numbers); otherwise a cursor page
+        (for "load more")."""
         stmt = self._query()
         if status:
             stmt = stmt.where(KnowledgeProposal.status == status)
@@ -178,6 +181,14 @@ class ProposalService:
             stmt = stmt.where(KnowledgeProposal.origin == origin)
         if origin_tenant_id:
             stmt = stmt.where(KnowledgeProposal.origin_tenant_id == origin_tenant_id)
+        if offset is not None:
+            total = await self.s.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+            page = await self.s.scalars(
+                stmt.order_by(KnowledgeProposal.created_at.desc(), KnowledgeProposal.id.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            return list(page), None, total
         rows, nxt = await paginate(
             self.s,
             stmt,
@@ -186,7 +197,7 @@ class ProposalService:
             limit=limit,
             cursor=cursor,
         )
-        return list(rows), nxt
+        return list(rows), nxt, None
 
     async def get(self, proposal_id: uuid.UUID, *, lock: bool = False) -> KnowledgeProposal:
         stmt = select(KnowledgeProposal).where(KnowledgeProposal.id == proposal_id)
@@ -254,11 +265,28 @@ class ProposalService:
         return proposal
 
     async def approve(
-        self, proposal_id: uuid.UUID, item_ids: list[uuid.UUID] | None, note: str, version: int
+        self,
+        proposal_id: uuid.UUID,
+        item_ids: list[uuid.UUID] | None,
+        note: str,
+        version: int,
+        *,
+        shared_websites: bool = False,
     ) -> KnowledgeProposal:
+        """Applies the chosen (default: all pending) items. `shared_websites`: a website another vendor already owns
+        is saved as a group website (the company shares its parent's site) instead of being refused."""
         proposal = await self.get(proposal_id, lock=True)
         self._check_open(proposal, version)
         approve = self._select_pending(proposal, item_ids)
+        if shared_websites:
+            for item in proposal.items:
+                if (
+                    item.id in approve
+                    and item.action == ProposalItemAction.UPDATE_VENDOR_FIELD
+                    and item.payload.get("field") == "website"
+                    and not item.payload.get("shared_domain")
+                ):
+                    item.payload = {**item.payload, "shared_domain": True}
         await self._decide(proposal, approve=approve, reject=[], note=note, auto=False)
         await self.s.commit()
         return proposal

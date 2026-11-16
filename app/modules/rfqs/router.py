@@ -3,11 +3,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import SessionDep, require
+from app.api.deps import ContainerDep, SessionDep, require
+from app.db.session import open_session
 from app.domain.permissions import P
-from app.domain.principal import Principal
+from app.domain.principal import Principal, TenantContext
 from app.modules.rfqs.schemas import (
     AwardRequest,
+    EmailPreview,
+    EmailSend,
+    EmailSendResult,
     RfqCreate,
     RfqRead,
     RfqStatus,
@@ -17,13 +21,16 @@ from app.modules.rfqs.schemas import (
     RfqVendorUpdate,
     Transition,
 )
-from app.modules.rfqs.service import RfqService
+from app.modules.rfqs.service import RfqService, Sender
+from app.modules.users.models import User
 
 router = APIRouter(tags=["rfqs"])
 
 
-def _svc(session: SessionDep, principal: Annotated[Principal, Depends(require(P.VENDOR_READ))]) -> RfqService:
-    return RfqService(session, principal)
+def _svc(
+    session: SessionDep, principal: Annotated[Principal, Depends(require(P.VENDOR_READ))], c: ContainerDep
+) -> RfqService:
+    return RfqService(session, principal, c.settings.rfq_test_recipient)
 
 
 Svc = Annotated[RfqService, Depends(_svc)]
@@ -74,6 +81,29 @@ _transition_route("cancelled", "cancel", "Cancel the RFQ")
 async def award_rfq(rfq_id: uuid.UUID, body: AwardRequest, svc: Svc) -> RfqRead:
     """Award to a vendor that quoted; the other quoted vendors are marked lost."""
     return await svc.award(rfq_id, body)
+
+
+async def _sender(c: ContainerDep, principal: Principal) -> Sender:
+    """The signed-in user's own name and address, read with platform rights: when platform staff view as an
+    organization, their user row is outside that organization's data."""
+    if principal.user_id is None:
+        return Sender(email=None, name=None)
+    async with open_session(c.sessionmaker, TenantContext.platform()) as s:
+        user = await s.get(User, principal.user_id)
+    return Sender(email=user.email, name=user.full_name) if user else Sender(email=None, name=None)
+
+
+@router.get("/rfqs/{rfq_id}/email", response_model=EmailPreview)
+async def rfq_email_preview(rfq_id: uuid.UUID, svc: Svc, c: ContainerDep) -> EmailPreview:
+    """The e-mail each vendor would receive (subject, text with the requirements) and who has an address."""
+    return await svc.email_preview(rfq_id, c.settings, await _sender(c, svc.principal))
+
+
+@router.post("/rfqs/{rfq_id}/email", response_model=EmailSendResult)
+async def send_rfq_email(rfq_id: uuid.UUID, body: EmailSend, svc: Svc, c: ContainerDep) -> EmailSendResult:
+    """E-mails the RFQ to the chosen vendors, one message each (no vendor sees another), replies going to the
+    sender. A draft RFQ is issued by it. `test_to_me` sends a single copy to the sender instead."""
+    return await svc.send_email(rfq_id, body, c.settings, c.email, await _sender(c, svc.principal))
 
 
 @router.get("/rfqs/{rfq_id}/vendors", response_model=list[RfqVendorRead])
