@@ -87,7 +87,8 @@ async def _sender(c: ContainerDep, principal: Principal) -> Sender:
     """The signed-in user's own name and address, read with platform rights: when platform staff view as an
     organization, their user row is outside that organization's data."""
     if principal.user_id is None:
-        return Sender(email=None, name=None)
+        # An API key has no user: use the configured reply-to (RFQ_REPLY_TO / RFQ_REPLY_TO_NAME), if any.
+        return Sender(email=c.settings.rfq_reply_to, name=c.settings.rfq_reply_to_name)
     async with open_session(c.sessionmaker, TenantContext.platform()) as s:
         user = await s.get(User, principal.user_id)
     return Sender(email=user.email, name=user.full_name) if user else Sender(email=None, name=None)

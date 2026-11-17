@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     # Testing only: RFQ e-mails for vendors with no address on record go here instead (subject marked "[TEST for
     # <vendor>]"). Leave empty in production so such vendors are skipped.
     rfq_test_recipient: str | None = None
+    # RFQ e-mails sent through an API key (an integration such as the Valvesheet portal) have no signed-in user, so
+    # vendors' replies and the "test copy" go to this address and name instead. Leave empty to keep replies going to
+    # smtp_from.
+    rfq_reply_to: str | None = None
+    rfq_reply_to_name: str | None = None
 
     @property
     def is_production(self) -> bool:
