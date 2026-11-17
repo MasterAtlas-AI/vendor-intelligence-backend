@@ -117,7 +117,21 @@ PLATFORM_ROLES: dict[str, frozenset[P]] = {
 # Scopes an API key may carry: integration-safe permissions only (no user/key administration).
 API_KEY_ALLOWED_SCOPES: frozenset[P] = frozenset(
     _READ
-    | {P.UPLOAD_CREATE, P.DISCOVERY_RUN, P.USER_READ, P.EQUIPMENT_MANAGE, P.COMMERCIAL_READ, P.DATA_EXPORT}
+    | {
+        P.UPLOAD_CREATE,
+        P.DISCOVERY_RUN,
+        P.USER_READ,
+        P.EQUIPMENT_MANAGE,
+        P.COMMERCIAL_READ,
+        P.DATA_EXPORT,
+        # Lets an integration create and run the organization's RFQs (invite vendors, record quotes, award). The
+        # organization's own data only; it does not reach the shared knowledge base.
+        P.RFQ_MANAGE,
+        # Lets a trusted integration (the Valvesheet portal) review proposals and run the data-quality AI. It acts on
+        # the global knowledge base, so only a curator or super admin can create such a key, and the key must be kept
+        # secret: anyone holding it can approve or reject shared knowledge.
+        P.KNOWLEDGE_APPROVE,
+    }
 )
 
 
