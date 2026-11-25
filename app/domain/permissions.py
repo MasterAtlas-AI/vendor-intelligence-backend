@@ -127,6 +127,14 @@ API_KEY_ALLOWED_SCOPES: frozenset[P] = frozenset(
         # Lets an integration create and run the organization's RFQs (invite vendors, record quotes, award). The
         # organization's own data only; it does not reach the shared knowledge base.
         P.RFQ_MANAGE,
+        # Lets an integration create and manage the organization's projects (sourcing workspaces and executed-project
+        # history). The organization's own data only.
+        P.PROJECT_MANAGE,
+        # Lets the Valvesheet portal invite users, change their roles and department, disable accounts, and manage the
+        # organization's custom roles. SECURITY: a key with these can create users with any role it holds itself, so it
+        # must be kept secret (it is readable in that portal's browser bundle). Only an organization admin can create it.
+        P.USER_MANAGE,
+        P.ROLE_MANAGE,
         # Lets a trusted integration (the Valvesheet portal) review proposals and run the data-quality AI. It acts on
         # the global knowledge base, so only a curator or super admin can create such a key, and the key must be kept
         # secret: anyone holding it can approve or reject shared knowledge.
