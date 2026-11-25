@@ -21,7 +21,7 @@ router = APIRouter(tags=["assistant"])
 def _svc(
     session: SessionDep, principal: Annotated[Principal, Depends(require(P.SEARCH_RUN))], c: ContainerDep
 ) -> AssistantService:
-    return AssistantService(session, principal, c.ai)
+    return AssistantService(session, principal, c.ai, c.sessionmaker)
 
 
 Svc = Annotated[AssistantService, Depends(_svc)]

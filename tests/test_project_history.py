@@ -334,7 +334,7 @@ async def test_assistant_respects_ai_controls(
 
     def answer(text: str) -> dict[str, Any]:
         seen.append(text)
-        return {"answer": "Nordic Seal Pumps [V1].", "cited_refs": ["V1"], "web_sources": [], "follow_ups": [],
+        return {"answer": "Nordic Seal Pumps [V1].", "cited_refs": ["V1"], "web_sources": [], "web_vendors": [], "follow_ups": [],
                 "actions": []}  # fmt: skip
 
     fake = FakeProvider(usage=Usage(model="fake-model"))

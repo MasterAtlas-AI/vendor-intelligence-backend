@@ -139,6 +139,10 @@ API_KEY_ALLOWED_SCOPES: frozenset[P] = frozenset(
         # the global knowledge base, so only a curator or super admin can create such a key, and the key must be kept
         # secret: anyone holding it can approve or reject shared knowledge.
         P.KNOWLEDGE_APPROVE,
+        # Lets the Valvesheet portal follow the background jobs (discovery runs, MEL reads) that its own key starts: a key
+        # has no user, so without this every job is hidden from it. It reads all of the organization's jobs and its audit
+        # log, so the key must be kept secret (it is readable in that portal's browser bundle).
+        P.AUDIT_READ,
     }
 )
 

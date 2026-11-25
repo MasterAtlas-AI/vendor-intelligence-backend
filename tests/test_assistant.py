@@ -55,6 +55,14 @@ async def test_assistant_answers_from_the_knowledge_base(
                 "cited_refs": ["V1", "V9"],
                 "web_sources": [{"ref": "W1", "title": "Nordic Pumps BB3", "url": "https://www.nordicpumps-maitest.com/bb3"},
                                 {"ref": "W2", "title": "Invented", "url": "https://invented-maitest.org/"}],
+                "web_vendors": [
+                    {"name": f"Nordic Pumps {tag}", "website": "https://www.nordicpumps-maitest.com", "country": "Norway",
+                     "supplies": "BB3 barrel pumps", "source_ref": "W1", "fit": "high"},
+                    {"name": "Made-up Pumps", "website": "", "country": "", "supplies": "pumps", "source_ref": "W2",
+                     "fit": "low"},  # its page wasn't returned by the search: dropped
+                    {"name": f"Fjord Barrel Pumps {tag}", "website": "", "country": "NO", "supplies": "BB2 pumps",
+                     "source_ref": "W1", "fit": "high"},  # already on the shortlist: dropped
+                ],
                 "follow_ups": ["Which of them hold ISO 9001?", "Do you want me to search the web for BB3 pumps?"],
                 "actions": [{"kind": "research_vendor", "ref": "V1", "website": "https://www.fjord-maitest.com",
                              "brief": ""},
@@ -80,6 +88,11 @@ async def test_assistant_answers_from_the_knowledge_base(
             {"ref": "W1", "title": "Nordic Pumps BB3", "url": "https://www.nordicpumps-maitest.com/bb3"}
         ]
         assert [c.web_search for c in fake.calls if c.schema == "AssistantAnswer"] == [True]
+        # Suppliers found on the web beyond the shortlist: grounded in a returned page, unscored, not shortlisted twice.
+        assert [
+            (w["name"], w["country"], w["fit"], w["source"]["url"], w["known_vendor_id"])
+            for w in body["web_vendors"]
+        ] == [(f"Nordic Pumps {tag}", "NO", "high", "https://www.nordicpumps-maitest.com/bb3", None)]
         # The workspace: the requirement understood, the shortlist with per-dimension scores and gaps, the steps.
         assert body["requirement"] is not None
         row = body["shortlist"][0]
@@ -90,11 +103,12 @@ async def test_assistant_answers_from_the_knowledge_base(
             "search_kb",
             "load_records",
             "history",
+            "documents",
             "answer",
             "check",
             "rank",
         ]
-        assert body["steps"][5]["detail"] == "Removed 2 unsupported citations" and body["started_at"]
+        assert body["steps"][6]["detail"] == "Removed 2 unsupported citations" and body["started_at"]
         assert [v["vendor_id"] for v in body["vendors"]] == [str(vid)] and body["searched"] == [
             f"BB2 pumps {tag}"
         ]
@@ -152,7 +166,7 @@ async def test_assistant_saves_chats(client: AsyncClient, factory: Factory, cont
 
     def answer(text: str) -> dict[str, Any]:
         calls["answer"] += 1
-        return {"answer": f"Answer {calls['answer']}", "cited_refs": [], "web_sources": [], "follow_ups": ["And in Norway?"],
+        return {"answer": f"Answer {calls['answer']}", "cited_refs": [], "web_sources": [], "web_vendors": [], "follow_ups": ["And in Norway?"],
                 "actions": []}  # fmt: skip
 
     fake = FakeProvider(usage=Usage(model="fake-model", input_tokens=100, output_tokens=20))
@@ -237,3 +251,38 @@ async def test_ai_failures_are_explained(client: AsyncClient, factory: Factory, 
             assert resp.status_code == status and resp.json()["code"] == code, resp.text
     finally:
         container.ai.provider, container.ai._sleep = previous, previous_sleep
+
+
+def test_approved_vendor_questions_are_recognised() -> None:
+    """Asking for approved vendors / the AVL limits the answer to the organization's approved vendors (and turns the
+    web search off); a vendor approved by a class society is not that."""
+    from app.modules.assistant.service import APPROVED
+
+    asks = [
+        "ball valves approved vendors in Singapore",
+        "Which of our approved suppliers make pumps?",
+        "our AVL for valves",
+    ]
+    other = ["vendors approved by ABS", "pump vendors in Singapore", "available ball valves", "AVLS"]
+    assert all(APPROVED.search(q) for q in asks) and not any(APPROVED.search(q) for q in other)
+
+
+def test_vendors_without_the_asked_equipment_are_recognised() -> None:
+    """A vendor with no product filed under the asked equipment stays only if it says it supplies it."""
+    import re
+    from types import SimpleNamespace
+
+    from app.modules.assistant.service import _mentions
+
+    words = re.compile(r"\b(ball|valve)(e?s)?\b", re.IGNORECASE)
+
+    def vendor(description: str = "", products: tuple[str, ...] = (), services: tuple[str, ...] = ()) -> Any:
+        return SimpleNamespace(description=description, equipment=[SimpleNamespace(name=p) for p in products],
+                               services=[SimpleNamespace(name=x) for x in services])  # fmt: skip
+
+    assert _mentions(vendor("Supplies valves, actuators and flow-control systems"), words)
+    assert _mentions(vendor(services=["Valve repair"]), words)
+    assert not _mentions(vendor("Classification, certification and technical assurance"), words)
+    assert not _mentions(vendor("Stockist of pipes, fittings and valves", products=["Pipe fittings"]), words)
+    assert _mentions(vendor(products=["Trunnion ball valves"]), words)
+    assert _mentions(vendor("anything"), None)  # no equipment asked for: nothing to check

@@ -15,20 +15,23 @@ The client sends the recent conversation with each question; each question and i
 user's chat history (`AssistantConversation`), so chats can be reopened, renamed and deleted.
 """
 
+import asyncio
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.ai.ports import Citation
 from app.ai.service import AINotAvailable, AiService, CallContext
 from app.core.exceptions import NotFound
-from app.domain.enums import VendorStatus
-from app.domain.normalization import normalize_website, registrable_domain
+from app.db.session import open_session
+from app.domain.enums import AvlStatus, VendorStatus
+from app.domain.normalization import normalize_country, normalize_name, normalize_website, registrable_domain
 from app.domain.permissions import P
 from app.domain.principal import Principal
 from app.modules.assistant.models import AssistantConversation, AssistantMessage
@@ -50,21 +53,26 @@ from app.modules.assistant.schemas import (
     SuggestedAction,
     WebPage,
     WebSource,
+    WebVendor,
+    WebVendorFound,
 )
 from app.modules.equipment.documents import DocumentHit, find_documents
 from app.modules.equipment.schemas import EquipmentSearch, ProjectEquipmentRead
 from app.modules.equipment.service import EquipmentService
-from app.modules.search.schemas import SearchFilters, SearchHit, SearchIntent, SearchRequest
-from app.modules.search.service import SearchService
+from app.modules.search.schemas import SearchFilters, SearchHit, SearchIntent, SearchRequest, SearchResponse
+from app.modules.search.service import SearchService, taxonomy
 from app.modules.tenants.policy import ai_controls
-from app.modules.vendors.models import Vendor
+from app.modules.vendors.models import Vendor, VendorAlias, VendorDomain
 from app.modules.vendors.schemas import VendorDetail
 from app.modules.vendors.service import VendorQueryService
 
-MAX_SEARCHES = 3
+MAX_SEARCHES = 5  # knowledge-base searches per question
 MAX_NAMED = 5
-HITS_PER_SEARCH = 6
-MAX_RECORDS = 12
+HITS_PER_SEARCH = 50  # every match a search returns (the search's own maximum)
+MAX_RECORDS = 99  # every matched vendor is loaded and scored (refs run V1..V99)
+AI_RECORDS = 25  # the best-matching of them are sent to the AI in full; the rest are scored in the app only
+PARALLEL = 12  # searches / record loads run at once, each on its own connection
+WEB_SEARCHES = 4  # web searches the answer may run
 HISTORY_MESSAGES = 10
 REF = re.compile(r"\[(V\d{1,2})\]")
 WEB_REF = re.compile(r"\[(W\d{1,2})\]")
@@ -72,6 +80,13 @@ HIST_REF = re.compile(r"\[(H\d{1,2})\]")  # the organization's own equipment lin
 DOC_REF = re.compile(r"\[(D\d{1,2})\]")  # and its project documents
 DOCUMENTS = 5
 HISTORY_LINES = 10
+WEB_PAGES = 99  # web pages the answer and the web-supplier list may point at
+WEB_VENDORS = 50  # suppliers found on the web, beyond the shortlist
+# "approved vendors / suppliers", "AVL", "approved vendor list": the organization's own approved vendors only.
+APPROVED = re.compile(
+    r"\b(approved\s+(vendors?|suppliers?|manufacturers?|makers?|oems?|sources?|list)|avl)\b",
+    re.IGNORECASE,
+)
 # Follow-ups must be the user's next questions, not the assistant offering to do something.
 OFFER = re.compile(r"^(do you want|would you like|should i|shall i|can i|may i|want me)\b", re.IGNORECASE)
 TITLE_CHARS = 80
@@ -157,6 +172,22 @@ def _plan_summary(plan: AssistantPlan, previous: list[VendorDetail]) -> str:
     if plan.my_vendors_only:
         parts.append("your vendors only")
     return "; ".join(parts)
+
+
+# Words in category names that say nothing about the equipment itself.
+GENERIC_WORDS = {"equipment", "other", "general", "system", "package", "auxiliarie", "auxiliary", "rotating", "static",
+                 "service", "misc", "miscellaneou", "item", "part", "unit", "type"}  # fmt: skip
+
+
+def _mentions(v: VendorDetail, words: re.Pattern[str] | None) -> bool:
+    """Whether a vendor with no product filed under the asked equipment still says it supplies it: in its
+    description, or in a product's or service's own name. A vendor whose filed products are all something else
+    (a piping stockist for "ball valves") doesn't count, whatever its description says."""
+    if words is None:
+        return True  # no equipment asked for: nothing to check against
+    if v.equipment:
+        return any(words.search(e.name or "") for e in v.equipment)
+    return bool(words.search(v.description or "")) or any(words.search(x.name or "") for x in v.services)
 
 
 def _merge_intents(intents: list[SearchIntent]) -> SearchIntent | None:
@@ -280,10 +311,30 @@ def _document_record(ref: str, d: DocumentHit) -> dict[str, Any]:
 
 
 class AssistantService:
-    def __init__(self, session: AsyncSession, principal: Principal, ai: AiService) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        principal: Principal,
+        ai: AiService,
+        sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
         self.s = session
         self.principal = principal
         self.ai = ai
+        self.sm = sessionmaker  # lets look-ups run side by side; without it they run one by one
+
+    async def _each[X, R](self, items: Sequence[X], fn: Callable[[AsyncSession, X], Awaitable[R]]) -> list[R]:
+        """fn(session, item) for every item, results in order. Up to PARALLEL run at once, each on its own session
+        bound to the caller's tenant: every look-up is several database round trips, so one-by-one adds up."""
+        if self.sm is None or len(items) < 2:
+            return [await fn(self.s, x) for x in items]
+        sm, gate = self.sm, asyncio.Semaphore(PARALLEL)
+
+        async def one(x: X) -> R:
+            async with gate, open_session(sm, self.principal.tenant_context(), self.principal.user_id) as s:
+                return await fn(s, x)
+
+        return list(await asyncio.gather(*(one(x) for x in items)))
 
     @property
     def _call(self) -> CallContext:
@@ -358,18 +409,35 @@ class AssistantService:
 
         ordered: list[uuid.UUID] = [v.id for v in previous]
         ordered += [v for v in await self._vendors_named(plan.vendor_names) if v not in ordered]
-        searched: list[str] = []
         hits: dict[uuid.UUID, SearchHit] = {}
         intents: list[SearchIntent] = []
-        search = SearchService(self.s, self.principal, self.ai)
-        filters = SearchFilters(my_vendors_only=plan.my_vendors_only and self.principal.tenant_id is not None)
-        for query in [q.strip() for q in plan.search_queries if q.strip()][:MAX_SEARCHES]:
-            searched.append(query)
-            result = await search.search(
+        # What the question itself asks for, read locally so it holds even when the planned searches leave it out
+        # ("ball valves approved vendors in Singapore" -> searches for "ball valves"): its countries, and whether it
+        # asks for the organization's approved vendors only.
+        question = req.messages[-1].content
+        asked = (await SearchService(self.s, self.principal, self.ai).parse(question, "local")).intent
+        countries = list(dict.fromkeys(asked.countries))
+        approved_only = self.principal.tenant_id is not None and bool(APPROVED.search(question))
+        own_only = self.principal.tenant_id is not None and (plan.my_vendors_only or approved_only)
+        filters = SearchFilters(
+            my_vendors_only=own_only,
+            avl_status=[AvlStatus.APPROVED] if approved_only else [],
+            countries=countries,
+        )
+        searched = [q.strip() for q in plan.search_queries if q.strip()][:MAX_SEARCHES]
+
+        async def run_search(s: AsyncSession, query: str) -> SearchResponse:
+            return await SearchService(s, self.principal, self.ai).search(
                 SearchRequest(query=query, parser="local", filters=filters, limit=HITS_PER_SEARCH)
             )
+
+        equipment_fit: dict[uuid.UUID, float | None] = {}
+        for result in await self._each(searched, run_search):
             intents.append(result.intent)
             for h in result.results:
+                fit = h.scores.equipment
+                was = equipment_fit.get(h.vendor.id)
+                equipment_fit[h.vendor.id] = fit if was is None else max(was, fit if fit is not None else was)
                 if h.vendor.id not in hits or h.confidence > hits[h.vendor.id].confidence:
                     hits[h.vendor.id] = h
             ordered += [h.vendor.id for h in result.results if h.vendor.id not in ordered]
@@ -381,17 +449,49 @@ class AssistantService:
                 f"{'s' if len(hits) != 1 else ''} matched",
             )
 
-        details: list[VendorDetail] = []
-        for vid in ordered[:MAX_RECORDS]:
+        async def load(s: AsyncSession, vid: uuid.UUID) -> VendorDetail | None:
             try:
-                details.append(await vendors_q.detail(vid))
+                return await VendorQueryService(s, self.principal).detail(vid)
             except NotFound:
-                continue
+                return None
+
+        details = [d for d in await self._each(ordered[:MAX_RECORDS], load) if d is not None]
+        if countries:
+            # A country asked for: vendors headquartered there. A sales office there doesn't count ("ball valve
+            # vendors in Singapore" shouldn't list an Italian maker with a Singapore office); a site counts only
+            # when the headquarters country isn't on record. Vendors named in the question are kept.
+            keep = set(countries)
+            named = {v.id for v in previous} | set(await self._vendors_named(plan.vendor_names))
+            details = [
+                d
+                for d in details
+                if d.id in named
+                or d.hq_country in keep
+                or (not d.hq_country and any(loc.country in keep for loc in d.locations))
+            ]
+        named_ids = {v.id for v in previous} | set(await self._vendors_named(plan.vendor_names))
+        equipment_words = await self._equipment_words(intents, asked)
+        off_topic = [
+            d
+            for d in details
+            if d.id not in named_ids and equipment_fit.get(d.id) == 0 and not _mentions(d, equipment_words)
+        ]
+        if off_topic and len(off_topic) < len(details):
+            details = [d for d in details if d not in off_topic]
+        else:
+            off_topic = []  # nothing would be left: keep them rather than answer with no vendors
         refs = {f"V{i}": v for i, v in enumerate(details, start=1)}
+        scope = [f"in {', '.join(countries)}"] if countries else []
+        if off_topic:
+            scope.append(f"{len(off_topic)} without a matching product left out")
+        scope += (
+            ["your approved vendors only"] if approved_only else ["your vendors only"] if own_only else []
+        )
         step(
             "load_records",
             "Load vendor records",
-            f"{len(details)} record{'s' if len(details) != 1 else ''} with approved facts and sources",
+            f"{len(details)} record{'s' if len(details) != 1 else ''} with approved facts and sources"
+            + (f" ({'; '.join(scope)})" if scope else ""),
         )
 
         # The organization's own history is matched here, locally; it reaches the AI only if the organization allows.
@@ -405,6 +505,13 @@ class AssistantService:
         # SOW 10: internal knowledge first. Equipment lines from the organization's own projects that match the request,
         # found locally; shown beside the answer, and sent to the AI only when the organization allows it.
         requirement = _merge_intents(intents)
+        if requirement is not None:
+            requirement.countries = list(dict.fromkeys(requirement.countries + countries))
+            requirement.standards = list(dict.fromkeys(asked.standards))
+            requirement.certifications = list(dict.fromkeys(asked.certifications))
+            requirement.equipment_categories = list(
+                dict.fromkeys(asked.equipment_categories + requirement.equipment_categories)
+            )
         lines = await self._history_lines(requirement, details, our_history) if has_history else []
         hist_refs = {f"H{i}": e for i, e in enumerate(lines, start=1)}
         if has_history:
@@ -428,22 +535,36 @@ class AssistantService:
         doc_refs = {f"D{i}": d for i, d in enumerate(found_docs, start=1)}
         shared = hist_refs if controls.share_private_data else {}
         shared_docs = doc_refs if controls.share_private_data else {}
-        web = plan.intent != "out_of_scope"
+        # The web can't know the organization's own vendor list: questions about it are answered from the records only.
+        web = plan.intent != "out_of_scope" and not own_only
+        asked_for = [f"countries: {', '.join(countries)}"] if countries else []
+        if own_only:
+            asked_for.append(f"the organization's {'approved' if approved_only else 'own'} vendors only")
+        asked_for.append(f"web search: {'on' if web else 'off'}")
         answered = await self.ai.run(
             ANSWER,
             AssistantAnswer,
             self._call,
             web_search=web,
+            max_searches=WEB_SEARCHES,
+            attempts=2,
             allowed_domains=controls.allowed_domains(),
             conversation=conversation,
+            scope="; ".join(asked_for),
             records=[
-                _record(ref, v, controls.share_private_data, our_history.get(v.id)) for ref, v in refs.items()
+                _record(ref, v, controls.share_private_data, our_history.get(v.id))
+                for ref, v in list(refs.items())[:AI_RECORDS]
             ],
             history=[_history_record(ref, e) for ref, e in shared.items()],
             documents=[_document_record(ref, d) for ref, d in shared_docs.items()],
         )
         answer = answered.output
         pages = self._web_pages(answer.web_sources, answered.citations)
+        web_vendors = (
+            await self._web_vendors(answer.web_vendors, pages, answered.citations, refs, countries)
+            if web and plan.intent in ("find_vendors", "compare", "knowledge_question")
+            else []
+        )
         text, removed = self._ground(answer.answer, refs, pages, {**shared, **shared_docs})
         cited = [r for r in dict.fromkeys(REF.findall(text)) if r in refs]
         web_cited = [pages[r] for r in dict.fromkeys(WEB_REF.findall(text)) if r in pages]
@@ -451,6 +572,11 @@ class AssistantService:
             "answer",
             "Search the web and write the answer" if web else "Write the answer",
             (f"{len(web_cited)} web page{'s' if len(web_cited) != 1 else ''} cited, " if web else "")
+            + (
+                f"{len(web_vendors)} more supplier{'s' if len(web_vendors) != 1 else ''} found on the web, "
+                if web_vendors
+                else ""
+            )
             + f"{len(cited)} vendor record{'s' if len(cited) != 1 else ''} cited",
         )
         step(
@@ -469,6 +595,7 @@ class AssistantService:
         reply = ChatResponse(
             answer=text,
             web_sources=web_cited,
+            web_vendors=web_vendors,
             vendors=[self._cited(r, refs[r]) for r in cited],
             follow_ups=[
                 f.strip()[:200] for f in answer.follow_ups if f.strip() and not OFFER.match(f.strip())
@@ -641,12 +768,113 @@ class AssistantService:
             sources=[s.url for s in v.sources if s.url][:3],
         )
 
+    async def _web_vendors(
+        self,
+        found: list[WebVendorFound],
+        pages: dict[str, WebSource],
+        citations: list[Citation],
+        refs: dict[str, VendorDetail],
+        countries: list[str] | None = None,
+    ) -> list[WebVendor]:
+        """Suppliers the web search found beyond the shortlist. Each must point at a page the search returned (or have
+        its own site among them); ones already shortlisted are dropped, ones already in the knowledge base are linked."""
+        searched = {registrable_domain(c.url) for c in citations} - {None}
+        shortlisted_names = {normalize_name(v.display_name) for v in refs.values()}
+        shortlisted_domains = {registrable_domain(v.website) for v in refs.values() if v.website} - {None}
+        out: list[WebVendor] = []
+        seen: set[str] = set()
+        for f in found[: WEB_VENDORS * 2]:
+            name = " ".join(f.name.split())[:200]
+            key = normalize_name(name)
+            if len(key) < 2 or key in seen or key in shortlisted_names:
+                continue
+            site = normalize_website(f.website.strip()) if f.website.strip() else None
+            domain = registrable_domain(site) if site else None
+            if domain and domain in shortlisted_domains:
+                continue
+            page = pages.get(f.source_ref.strip().strip("[]"))
+            if page is None:
+                if not domain or domain not in searched:
+                    continue  # nothing the search returned shows this supplier
+                page = WebSource(ref="", title=name, url=site or f"https://{domain}")
+            country = (normalize_country(f.country) or f.country.strip()[:60]) if f.country.strip() else None
+            if countries and country and country not in countries:
+                continue  # based elsewhere than the country asked for
+            known = await self._known_vendor(key, domain)
+            if known and known[0] in {v.id for v in refs.values()}:
+                continue
+            seen.add(key)
+            fit = f.fit.strip().lower()
+            out.append(
+                WebVendor(
+                    name=name,
+                    website=site,
+                    country=country,
+                    supplies=" ".join(f.supplies.split())[:200],
+                    fit=fit if fit in ("high", "medium", "low") else "medium",
+                    source=page,
+                    known_vendor_id=known[0] if known else None,
+                    known_vendor_name=known[1] if known else None,
+                )
+            )
+            if len(out) >= WEB_VENDORS:
+                break
+        order = {"high": 0, "medium": 1, "low": 2}
+        return sorted(out, key=lambda w: order[w.fit])
+
+    async def _equipment_words(
+        self, intents: list[SearchIntent], asked: SearchIntent
+    ) -> re.Pattern[str] | None:
+        """The asked equipment as words to look for in a vendor's description ("Ball valves" -> ball, valve), from
+        the names of the requested categories and their parents."""
+        codes = {c for i in [asked, *intents] for c in i.equipment_categories}
+        if not codes:
+            return None
+        tax = await taxonomy(self.s)
+        names: set[str] = set()
+        for code in codes:
+            parts = code.split(".")
+            for n in range(1, len(parts) + 1):
+                names.add(tax.names.get(("equipment", ".".join(parts[:n])), ""))
+        words = {
+            w.lower().removesuffix("es" if w.lower().endswith(("sses", "xes")) else "s")
+            for name in names
+            for w in re.findall(r"[A-Za-z]{4,}", name)
+        } - GENERIC_WORDS
+        if not words:
+            return None
+        return re.compile(r"\b(" + "|".join(sorted(map(re.escape, words))) + r")(e?s)?\b", re.IGNORECASE)
+
+    async def _known_vendor(self, key: str, domain: str | None) -> tuple[uuid.UUID, str] | None:
+        """A knowledge-base vendor with this website domain or this (normalized) name or alias."""
+        active = Vendor.status == VendorStatus.ACTIVE
+        if domain:
+            row = (
+                await self.s.execute(
+                    select(Vendor.id, Vendor.display_name)
+                    .join(VendorDomain, VendorDomain.vendor_id == Vendor.id)
+                    .where(active, VendorDomain.domain == domain)
+                    .limit(1)
+                )
+            ).first()
+            if row:
+                return row[0], row[1]
+        row = (
+            await self.s.execute(
+                select(Vendor.id, Vendor.display_name)
+                .outerjoin(VendorAlias, VendorAlias.vendor_id == Vendor.id)
+                .where(active, or_(Vendor.normalized_name == key, VendorAlias.normalized_alias == key))
+                .limit(1)
+            )
+        ).first()
+        return (row[0], row[1]) if row else None
+
     @staticmethod
     def _web_pages(listed: list[WebPage], citations: list[Citation]) -> dict[str, WebSource]:
         """The web pages the answer may cite: only those on a site the search actually returned."""
         searched = {registrable_domain(c.url) for c in citations} - {None}
         pages: dict[str, WebSource] = {}
-        for p in listed[:10]:
+        for p in listed[:WEB_PAGES]:
             ref, url = p.ref.strip().strip("[]"), p.url.strip()
             if (
                 not WEB_REF.fullmatch(f"[{ref}]")

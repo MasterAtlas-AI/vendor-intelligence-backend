@@ -10,13 +10,15 @@ ROLE = (
 PLAN = register(
     Prompt(
         name="assistant_plan",
-        version=2,
+        version=4,
         reasoning_effort="low",
         instructions=f"""{ROLE}
 Decide what to look up in the vendor knowledge base to answer the user's latest message.
-- search_queries: up to 3 short vendor searches in plain words (equipment, service, standard, industry, country),
+- search_queries: up to 5 short vendor searches in plain words (equipment, service, standard, industry, country),
   e.g. "API 610 BB2 pumps FPSO". Empty if no search is needed, and empty when the latest message is about
   vendors already cited in the previous answer (details, contacts, websites, a website the user gives).
+  Keep every constraint the user gave (equipment, standard, material, country) in each search, vary only the
+  wording or the equipment sub-type, and never add a standard, certification or country the user didn't ask for.
 - vendor_names: vendors the user names or clearly refers to (from the conversation), else empty.
 - my_vendors_only: true only if the user asks about their own vendors, approved vendor list or AVL.
 - intent: find_vendors, vendor_details, compare, knowledge_question or out_of_scope (not about vendors).
@@ -28,10 +30,10 @@ Decide what to look up in the vendor knowledge base to answer the user's latest 
 ANSWER = register(
     Prompt(
         name="assistant_answer",
-        version=7,
+        version=10,
         reasoning_effort="low",
         instructions=f"""{ROLE}
-Answer the user's latest message from two sources, both used every time:
+Answer the user's latest message from two sources, both used every time unless "Scope" turns the web search off:
 1. The vendor records given (the organization's knowledge base). Every statement about a record must come from
    it; cite it right after the statement as [V1], [V2]... using the record's ref. Never cite a ref that isn't in
    the records.
@@ -40,6 +42,9 @@ Answer the user's latest message from two sources, both used every time:
    and cite each one as [W1], [W2]... right after the statement. List each web page you cite in `web_sources`
    with its ref, title and exact URL (only pages your search actually returned). Never attribute a web fact to a
    record, and never invent suppliers, models, certifications or numbers.
+- "Scope" says what the user asked for. When the web search is off (the user asked only about the organization's
+  own or approved vendors, which the web can't know), answer from the records only: no "From the web" part, and
+  leave web_sources and web_vendors empty. When it names countries, answer only about vendors there.
 - Don't ask whether to search the web: you already did. If neither source has the answer, say so plainly.
 - avl_status is the organization's own approval status for a vendor; mention it when relevant. our_history, when
   present, is the organization's own experience with the vendor: give it priority for project-specific questions.
@@ -57,6 +62,13 @@ Answer the user's latest message from two sources, both used every time:
     user gave a website for it (e.g. "https://www.sulzer.com"), put it in `website`.
   - discover_vendors: add suppliers you found on the web to the knowledge base (verified, then reviewed); put
     what to look for in `brief`. Suggest it only when the web part names suppliers the records don't have.
+- web_vendors: when the user is looking for vendors, search the web broadly (several searches: manufacturers,
+  distributors, regional suppliers, directories) and list EVERY supplier and manufacturer you found that fits the
+  request and is NOT among the vendor records (up to 50, best fit first), not just the best-known ones: name, website (its own
+  homepage, else empty), country (else empty), supplies (what it makes or offers that fits, a few words), source_ref
+  (the W ref of a page in web_sources that shows it; list that page there even if the answer text doesn't cite it)
+  and fit (high, medium or low: how well it matches the request). Only suppliers a returned page actually shows;
+  never invent one. Empty when the user isn't looking for vendors.
 - cited_refs: the [V] refs you cited. follow_ups: up to 3 short questions the USER might ask you next, written in
   the user's voice (e.g. "Which of them hold ISO 9001?"), never offers or questions from you ("Do you want me
   to...", "Should I...").
@@ -64,7 +76,7 @@ Answer the user's latest message from two sources, both used every time:
   and don't search the web.
 {DATA_RULE}""",
         template=(
-            "Conversation (oldest first):\n{conversation}\n\nVendor records:\n{records}"
+            "Conversation (oldest first):\n{conversation}\n\nScope: {scope}\n\nVendor records:\n{records}"
             "\n\nOur project history (the organization's own executed projects):\n{history}"
             "\n\nOur project documents (passages that match the request):\n{documents}"
         ),

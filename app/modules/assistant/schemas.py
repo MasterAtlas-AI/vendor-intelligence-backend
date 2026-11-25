@@ -43,6 +43,20 @@ class WebSource(BaseModel):
     url: str
 
 
+class WebVendor(BaseModel):
+    """A supplier the AI's web search found for the request that isn't on the shortlist: shown beside it, unscored
+    (nothing about it is verified yet). `known_vendor_id` is set when it is already in the knowledge base."""
+
+    name: str
+    website: str | None = None
+    country: str | None = None
+    supplies: str = ""  # what it makes or offers that fits the request
+    fit: Literal["high", "medium", "low"] = "medium"  # the AI's own view of how well it matches; not a score
+    source: WebSource  # the page that shows it
+    known_vendor_id: uuid.UUID | None = None
+    known_vendor_name: str | None = None
+
+
 class ChatAction(BaseModel):
     """Something the app can do next, shown as a button. Nothing runs until the user clicks (and confirms)."""
 
@@ -132,6 +146,8 @@ class ChatResponse(BaseModel):
     answer: str  # plain text with "- " lists; vendors cited as [V1], [V2]
     vendors: list[CitedVendor]
     web_sources: list[WebSource] = Field(default_factory=list)  # pages cited as [W1], [W2]
+    # Suppliers found on the web for this request, beyond the knowledge-base shortlist (unverified, unscored).
+    web_vendors: list[WebVendor] = Field(default_factory=list)
     follow_ups: list[str]
     actions: list[ChatAction] = Field(default_factory=list)
     searched: list[str]  # what the assistant looked up, for transparency
@@ -208,9 +224,19 @@ class WebPage(BaseModel):
     url: str
 
 
+class WebVendorFound(BaseModel):
+    name: str
+    website: str  # its own homepage, else empty
+    country: str  # where it is based, else empty
+    supplies: str  # what it makes or offers that fits the request (a few words)
+    source_ref: str  # the W ref (from web_sources) of a page that shows it
+    fit: str  # high | medium | low
+
+
 class AssistantAnswer(BaseModel):
     answer: str
     cited_refs: list[str]
     web_sources: list[WebPage]
+    web_vendors: list[WebVendorFound]
     follow_ups: list[str]
     actions: list[SuggestedAction]

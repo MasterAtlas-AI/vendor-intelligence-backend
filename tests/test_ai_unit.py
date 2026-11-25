@@ -221,3 +221,26 @@ async def test_openai_embeddings_keep_order_and_count_tokens() -> None:
         "dimensions": 1536,
     }
     assert str(embedding_cost(result.usage, settings())) == "0.010000"  # 0.5M tokens at $0.02/M
+
+
+def test_citations_include_web_search_sources() -> None:
+    """Structured (JSON) answers carry no text annotations: the search call's own sources still ground web facts."""
+    from app.ai.providers.openai_provider import citations_from
+
+    ns = SimpleNamespace
+
+    response = ns(
+        output=[
+            ns(type="web_search_call", action=ns(type="search", sources=[ns(type="url", url="https://www.grundfos.com/pumps"),
+                                                                        {"type": "url", "url": "https://www.xylem.com/"}])),
+            ns(type="web_search_call", action=ns(type="open_page", url="https://www.wilo.com/x", sources=None)),
+            ns(type="message", content=[ns(annotations=[ns(type="url_citation", url="https://www.ksb.com/", title="KSB"),
+                                                        ns(type="url_citation", url="https://www.grundfos.com/pumps", title="")])]),
+        ]
+    )  # fmt: skip
+    assert [c.url for c in citations_from(response)] == [
+        "https://www.ksb.com/",
+        "https://www.grundfos.com/pumps",
+        "https://www.xylem.com/",
+        "https://www.wilo.com/x",
+    ]

@@ -153,7 +153,9 @@ class AiService:
         *,
         web_search: bool = False,
         allowed_domains: list[str] | None = None,
+        max_searches: int | None = None,
         max_output_tokens: int | None = None,
+        attempts: int | None = None,  # fewer retries for calls a person is waiting on
         **inputs: Any,
     ) -> LLMResult[T]:
         provider = self.provider
@@ -171,13 +173,14 @@ class AiService:
                 schema=schema,
                 web_search=web_search,
                 allowed_domains=allowed_domains,
+                max_searches=max_searches,
                 max_output_tokens=max_output_tokens,
                 reasoning_effort=prompt.reasoning_effort,
             )
 
         try:
             result: LLMResult[T] = await with_retries(
-                call, attempts=self.settings.ai_max_retries, sleep=self._sleep, on_retry=retrying
+                call, attempts=attempts or self.settings.ai_max_retries, sleep=self._sleep, on_retry=retrying
             )
         except AINotConfigured as exc:
             raise AINotAvailable(str(exc)) from exc

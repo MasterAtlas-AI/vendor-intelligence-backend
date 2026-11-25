@@ -13,15 +13,38 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def citations_from(response: Any) -> list[Citation]:
-    """URL citations attached to the answer, de-duplicated, in order of first appearance."""
+    """Pages the web search returned, de-duplicated, in order of first appearance: URL citations attached to the
+    answer text, then each search call's own sources. Structured (JSON) answers usually carry no text annotations,
+    so the search sources are what grounds their web facts."""
     seen: dict[str, Citation] = {}
-    for item in getattr(response, "output", None) or []:
+
+    def add(url: Any, title: Any = "") -> None:
+        if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in seen:
+            seen[url] = Citation(url=url, title=title if isinstance(title, str) else "")
+
+    items = getattr(response, "output", None) or []
+    for item in items:
         if getattr(item, "type", None) != "message":
             continue
         for part in getattr(item, "content", None) or []:
             for ann in getattr(part, "annotations", None) or []:
-                if getattr(ann, "type", None) == "url_citation" and ann.url not in seen:
-                    seen[ann.url] = Citation(url=ann.url, title=getattr(ann, "title", "") or "")
+                if getattr(ann, "type", None) == "url_citation":
+                    add(ann.url, getattr(ann, "title", ""))
+    for item in items:
+        if getattr(item, "type", None) != "web_search_call":
+            continue
+        action = getattr(item, "action", None)
+        sources = (
+            getattr(action, "sources", None)
+            or (action.get("sources") if isinstance(action, dict) else None)
+            or []
+        )
+        for src in sources:
+            url = src.get("url") if isinstance(src, dict) else getattr(src, "url", None)
+            title = src.get("title", "") if isinstance(src, dict) else getattr(src, "title", "")
+            add(url, title or "")
+        if getattr(action, "type", None) == "open_page":
+            add(getattr(action, "url", None))
     return list(seen.values())
 
 
@@ -99,6 +122,7 @@ class OpenAIProvider:
         schema: type[T],
         web_search: bool = False,
         allowed_domains: list[str] | None = None,
+        max_searches: int | None = None,
         max_output_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResult[T]:
@@ -117,7 +141,12 @@ class OpenAIProvider:
         }
         if tools:
             kwargs["tools"] = tools
-            kwargs["max_tool_calls"] = self.max_searches  # each search costs money and adds result tokens
+            kwargs["max_tool_calls"] = (
+                max_searches or self.max_searches
+            )  # each search costs money and adds result tokens
+            kwargs["include"] = [
+                "web_search_call.action.sources"
+            ]  # the pages each search returned (for grounding)
         if max_output_tokens:
             kwargs["max_output_tokens"] = max_output_tokens
         if reasoning_effort and self.model.startswith(("gpt-5", "o")):  # only reasoning models take it

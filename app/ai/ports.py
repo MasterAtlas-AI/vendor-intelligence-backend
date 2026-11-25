@@ -72,6 +72,7 @@ class LLMProvider(Protocol):
         schema: type[T],
         web_search: bool = False,
         allowed_domains: list[str] | None = None,
+        max_searches: int | None = None,
         max_output_tokens: int | None = None,
         reasoning_effort: str | None = None,
     ) -> LLMResult[T]: ...
